@@ -2856,3 +2856,24 @@ fn test_parsing_after_editing_text_before_a_node_another_version_popped_past() {
         &[(0, 0, b"{")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_a_pop_through_merged_paths() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_a_pop_through_merged_paths"),
+        b"zc{{{}=zc={{}=z{=}=",
+        &[(4, 1, b"")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_readings_that_merge_and_split_again() {
+    // In the first text, a node is reduced above a pop that follows merged paths and splits them
+    // into versions again.
+    let language = get_language("javascript");
+    let code: &[u8] = b"(a - b / c\nif (a - b) /c/;\n";
+    let edit: (usize, usize, &[u8]) = (0, 0, b"if ");
+    let undo: (usize, usize, &[u8]) = (0, 3, b"");
+    assert_reparse_matches_fresh_parse(&language, code, &[edit]);
+    assert_reparse_matches_fresh_parse(&language, code, &[edit, undo]);
+}

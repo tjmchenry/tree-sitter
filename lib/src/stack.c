@@ -43,6 +43,7 @@ struct StackNode {
   uint32_t error_cost;
   uint32_t node_count;
   int32_t dynamic_precedence;
+  uint32_t between_serial;
 };
 
 typedef struct {
@@ -76,6 +77,7 @@ struct Stack {
   StackNodeArray node_pool;
   StackNode *base_node;
   SubtreePool *subtree_pool;
+  uint32_t between_serial;
 };
 
 typedef uint32_t StackAction;
@@ -530,6 +532,61 @@ TS_STACK_NOINLINE void ts_stack_keep_lex_state(Stack *self, StackVersion version
 
 bool ts_stack_has_context(const Stack *self, StackVersion version) {
   return array_get(&self->heads, version)->node->has_context;
+}
+
+static bool stack_node__is_above_at_byte(const StackNode *node, const StackNode *other) {
+  if (node->node_count != other->node_count) return node->node_count > other->node_count;
+  for (const StackNode *below = other; below->link_count > 0;) {
+    below = below->links[0].node;
+    if (below->position.bytes != node->position.bytes || below->node_count != node->node_count) break;
+    if (below == node) return false;
+  }
+  return true;
+}
+
+// Whether, of two stack nodes, the first one is to be left first on the way down to the node their
+// chains share: the one further on in the text, or the one above the other where they are level.
+static inline bool stack_node__is_above(const StackNode *node, const StackNode *other) {
+  if (node->position.bytes != other->position.bytes) return node->position.bytes > other->position.bytes;
+  return stack_node__is_above_at_byte(node, other);
+}
+
+TS_STACK_NOINLINE void ts_stack_add_context_between(Stack *self, const StackSliceArray *slices) {
+  // Each walk leaves its number in the nodes it marks. Stack nodes that all have one number were
+  // marked by one walk, which went on to the node all its chains share.
+  const StackHead *heads = self->heads.contents;
+  const StackSlice *slice = slices->contents;
+  StackNode *trunk = heads[slice[0].version].node;
+  bool is_marked = trunk->between_serial != 0, is_split = false;
+  for (uint32_t i = 1; i < slices->size; i++) {
+    const StackNode *node = heads[slice[i].version].node;
+    if (node != trunk) is_split = true;
+    if (node->between_serial != trunk->between_serial) is_marked = false;
+  }
+  if (!is_split || is_marked) return;
+  uint32_t serial = ++self->between_serial;
+  if (serial == 0) serial = ++self->between_serial;
+
+  // Join each chain to the ones before it: `trunk` is the lowest node those have reached.
+  for (uint32_t i = 1; i < slices->size; i++) {
+    StackNode *node = heads[slice[i].version].node;
+    while (node != trunk && node->between_serial != serial) {
+      if (node->link_count > 0 && (trunk->link_count == 0 || stack_node__is_above(node, trunk))) {
+        node->has_context = true;
+        node->between_serial = serial;
+        node = node->links[0].node;
+      } else if (trunk->link_count > 0) {
+        trunk->has_context = true;
+        trunk->between_serial = serial;
+        trunk = trunk->links[0].node;
+      } else {
+        break;
+      }
+    }
+  }
+
+  // The node the chains share is not marked, but stands for this walk in a later pop it is a base of.
+  trunk->between_serial = serial;
 }
 
 Subtree ts_stack_last_external_token(const Stack *self, StackVersion version) {

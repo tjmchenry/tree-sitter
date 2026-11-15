@@ -71,6 +71,13 @@ void ts_stack_keep_lex_state_below_extras(Stack *, StackVersion);
 // Whether a node reduced from the top of this version would depend on text before its start.
 bool ts_stack_has_context(const Stack *, StackVersion);
 
+// A pop that follows merged paths down to different stack nodes splits them into versions again.
+// Which of those go on was decided by readings that had split off before the stack nodes between
+// the node all the paths share and the top, so a node reduced from one of those later depends on
+// them. Record that dependency for every stack node that only some of the versions of a pop's slices
+// have.
+void ts_stack_add_context_between(Stack *, const StackSliceArray *);
+
 // Pop a given number of entries, like `ts_stack_pop_count`. With `marks`, record that dependency for
 // each stack node that was popped past: the popping version has read the stack below it.
 StackSliceArray ts_stack_pop_count_past(Stack *, StackVersion, uint32_t count, bool marks);

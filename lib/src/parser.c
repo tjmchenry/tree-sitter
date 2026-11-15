@@ -1063,6 +1063,7 @@ static StackVersion ts_parser__reduce(
   // reading is lost, a node reduced from there later depends on that.
   is_fragile = is_fragile || initial_version_count > 1;
   StackSliceArray pop = ts_stack_pop_count_past(self->stack, version, count, is_fragile);
+  if (pop.size > 1) ts_stack_add_context_between(self->stack, &pop);
   uint32_t removed_version_count = 0;
   uint32_t halted_version_count = ts_stack_halted_version_count(self->stack);
   for (uint32_t i = 0; i < pop.size; i++) {
@@ -1346,6 +1347,7 @@ static bool ts_parser__recover_to_state(
   TSStateId goal_state
 ) {
   StackSliceArray pop = ts_stack_pop_count_past(self->stack, version, depth, true);
+  if (pop.size > 1) ts_stack_add_context_between(self->stack, &pop);
   StackVersion previous_version = STACK_VERSION_NONE;
 
   for (uint32_t i = 0; i < pop.size; i++) {
