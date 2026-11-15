@@ -1531,8 +1531,13 @@ static void ts_parser__recover(
   // of the previous parse states and their depths. Look at each state in the summary, to see
   // if the current lookahead token would be valid in that state.
   if (summary && !ts_subtree_is_error(lookahead)) {
+    // Each state examined here lies below the stack nodes above it, so a node reduced later from one
+    // of those depends on text before its start.
+    StackPlace examined = {position.bytes, UINT32_MAX, UINT32_MAX};
     for (uint32_t i = 0; i < summary->size; i++) {
       StackSummaryEntry entry = *array_get(summary, i);
+      StackPlace place = {entry.position.bytes, entry.node_count, entry.rank};
+      if (ts_stack_place_is_past(examined, place)) examined = place;
 
       if (entry.state == ERROR_STATE) continue;
       if (entry.position.bytes == position.bytes) continue;
@@ -1571,6 +1576,7 @@ static void ts_parser__recover(
         }
       }
     }
+    ts_stack_add_context_below_top(self->stack, version, examined);
   }
 
   // In the process of attempting to recover, some stack versions may have been created

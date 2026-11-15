@@ -31,10 +31,13 @@ typedef struct {
   uint32_t rank;
 } StackPlace;
 
+// A state on the stack, with the place of its stack node: `position.bytes`, `node_count`, `rank`.
 typedef struct {
   Length position;
   uint32_t depth;
   TSStateId state;
+  uint32_t node_count;
+  uint32_t rank;
 } StackSummaryEntry;
 typedef Array(StackSummaryEntry) StackSummary;
 
@@ -88,6 +91,10 @@ bool ts_stack_has_context(const Stack *, StackVersion);
 // Record that the stack nodes of a version that lie past a place in the stack, and before a byte,
 // carry such a dependency.
 void ts_stack_add_context(Stack *, StackVersion, StackPlace start, uint32_t end);
+
+// Record that dependency for the stack nodes of a version that lie past a place and below the top of
+// its stack.
+void ts_stack_add_context_below_top(Stack *, StackVersion, StackPlace start);
 
 // Whether one place is past another.
 static inline bool ts_stack_place_is_past(StackPlace self, StackPlace other) {

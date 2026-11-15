@@ -602,6 +602,18 @@ TS_STACK_NOINLINE void ts_stack_add_context(Stack *self, StackVersion version, S
   stack_node_add_context(array_get(&self->heads, version)->node, &start, end);
 }
 
+TS_STACK_NOINLINE void ts_stack_add_context_below_top(Stack *self, StackVersion version, StackPlace start) {
+  StackNode *top = array_get(&self->heads, version)->node;
+  for (uint32_t i = 0; i < top->link_count; i++) {
+    StackNode *node = top->links[i].node;
+    if (
+      node->context_start > 0 &&
+      !ts_stack_place_is_past(stack_node__context_start(node), start)
+    ) continue;
+    stack_node_add_context(node, &start, UINT32_MAX);
+  }
+}
+
 static bool stack_node__is_above_at_byte(const StackNode *node, const StackNode *other) {
   if (node->node_count != other->node_count) return node->node_count > other->node_count;
   for (const StackNode *below = other; below->link_count > 0;) {
@@ -904,6 +916,8 @@ forceinline StackAction summarize_stack_callback(void *payload, const StackItera
     .position = iterator->node->position,
     .depth = depth,
     .state = state,
+    .node_count = iterator->node->node_count,
+    .rank = stack_node__place(iterator->node).rank,
   }));
   return StackActionNone;
 }

@@ -2924,3 +2924,51 @@ fn test_parsing_after_editing_text_before_a_merge_that_raised_a_node_count() {
         &[(0, 2, b"")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_a_paused_version_removed() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_paused_version_pruning"),
+        b"{;x;,",
+        &[(0, 0, b"c")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_a_recovery_a_cheaper_version_cut_short() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_better_version_pruning"),
+        b")(;;;;)b",
+        &[(0, 0, b"b")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_a_finished_tree_choice() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_a_finished_tree_choice"),
+        b"y=bb}=bb}abxbx=bb}ax",
+        &[(1, 0, b"b")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_states_that_recovery_examined() {
+    // Without the `{` of the loop, error recovery examines states that lie below a node reduced
+    // afterwards.
+    let language = get_language("javascript");
+    let code: &[u8] = b"for (;;) {\n  if (a) {\n    { b;\n  } else {\n    c;\n  }\n}\n";
+    let edit: (usize, usize, &[u8]) = (9, 1, b"");
+    let undo: (usize, usize, &[u8]) = (9, 0, b"{");
+    assert_reparse_matches_fresh_parse(&language, code, &[edit]);
+    assert_reparse_matches_fresh_parse(&language, code, &[edit, undo]);
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_a_node_reduced_above_examined_states() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_recovery_examined_earlier_states"),
+        b"=;=bz=;=;;=;c;zb=;bcb}",
+        &[(3, 2, b"")],
+    );
+}
