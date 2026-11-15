@@ -1,0 +1,16 @@
+=========================================
+if statements
+=========================================
+if (e) break
+if (s) x()
+---
+(source_file
+  (if_statement
+    (condition
+      (identifier))
+    (break_statement))
+  (if_statement
+    (condition
+      (identifier))
+    (call
+      (identifier))))

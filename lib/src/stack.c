@@ -540,6 +540,11 @@ forceinline StackAction pop_pending_callback(void *payload, const StackIterator 
   (void)payload;
   if (iterator->subtree_count >= 1) {
     if (iterator->is_pending) {
+      // An error above the pending node was pushed by error recovery, which made the next token
+      // invalid, not the reuse of that node. Leave the node whole.
+      for (uint32_t i = 0; i + 1 < iterator->subtrees.size; i++) {
+        if (ts_subtree_is_error(*array_get(&iterator->subtrees, i))) return StackActionStop;
+      }
       return StackActionPop | StackActionStop;
     } else {
       return StackActionStop;

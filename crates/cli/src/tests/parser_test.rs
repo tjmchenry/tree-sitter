@@ -2719,3 +2719,12 @@ fn test_parsing_after_editing_a_node_reused_while_the_stack_splits() {
         &[(8, 0, b"product ")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_that_recovery_puts_after_a_reused_node() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_before_recovery_error"),
+        b"if (e) break\nif (s) x()\n",
+        &[(16, 3, b"else")],
+    );
+}
