@@ -122,6 +122,62 @@ struct TSParser {
   TSStateId lex_state;
 };
 
+// Dropping a version by comparing it with the others, or by counting them, decides the reading of
+// a node that starts where the version had already split from the one that reduces the node, but only
+// if another live version had split off before that start: otherwise every version involved is
+// parsing the node's own text. Every stack node between those two splits is marked. Where it is a
+// recovery of the version itself that is ruled out (`own`), the version goes on, so the nodes up to
+// its own position are marked.
+//
+// A paused version is dropped whenever some version that is neither paused nor in the error state
+// exists. If every other version that goes on is one, any of them alone would have had it dropped.
+static TS_NOINLINE void ts_parser__note_drop_among(
+  TSParser *self,
+  StackVersion version,
+  bool own,
+  bool by_comparison
+) {
+  uint32_t version_count = ts_stack_version_count(self->stack);
+  if (by_comparison && ts_stack_is_paused(self->stack, version)) {
+    bool survives = false, depends = false;
+    for (StackVersion i = 0; i < version_count; i++) {
+      if (i == version || !ts_stack_is_active(self->stack, i)) continue;
+      if (ts_stack_state(self->stack, i) == ERROR_STATE) depends = true;
+      survives = true;
+    }
+    if (survives && !depends) return;
+  }
+
+  // With one other version, the two splits are one.
+  if (!own && version_count <= 2) return;
+
+  StackPlace start = {UINT32_MAX, UINT32_MAX, UINT32_MAX}, end = {0, 0, 0};
+  for (StackVersion i = 0; i < version_count; i++) {
+    if (i == version) continue;
+    StackPlace place = ts_stack_divergence(self->stack, version, i);
+    if (ts_stack_place_is_past(start, place)) start = place;
+    if (ts_stack_place_is_past(place, end)) end = place;
+  }
+  if (own) {
+    uint32_t byte = ts_stack_position(self->stack, version).bytes;
+    if (byte >= end.byte) end = (StackPlace) {byte, UINT32_MAX, UINT32_MAX};
+  }
+  if (ts_stack_place_is_past(end, start)) {
+    ts_stack_add_context(self->stack, version, start, end.byte + 1);
+  }
+}
+
+static inline void ts_parser__note_drop(
+  TSParser *self,
+  StackVersion version,
+  bool own,
+  bool by_comparison
+) {
+  if (own || ts_stack_version_count(self->stack) > 2) {
+    ts_parser__note_drop_among(self, version, own, by_comparison);
+  }
+}
+
 typedef struct {
   uint32_t cost;
   uint32_t node_count;
@@ -365,6 +421,7 @@ static bool ts_parser__better_version_exists(
   uint32_t cost
 ) {
   if (self->finished_tree.ptr && ts_subtree_error_cost(self->finished_tree) <= cost) {
+    ts_parser__note_drop(self, version, true, false);
     return true;
   }
 
@@ -383,9 +440,13 @@ static bool ts_parser__better_version_exists(
     ErrorStatus status_i = ts_parser__version_status(self, i);
     switch (ts_parser__compare_versions(self, status, status_i)) {
       case ErrorComparisonTakeRight:
+        ts_parser__note_drop(self, version, true, false);
         return true;
       case ErrorComparisonPreferRight:
-        if (ts_stack_can_merge(self->stack, i, version)) return true;
+        if (ts_stack_can_merge(self->stack, i, version)) {
+          ts_parser__note_drop(self, version, true, false);
+          return true;
+        }
         break;
       default:
         break;
@@ -1041,6 +1102,11 @@ static void ts_parser__shift(
   }
 }
 
+static TS_NOINLINE void ts_parser__drop_version(TSParser *self, StackVersion version, bool by_comparison) {
+  ts_parser__note_drop(self, version, false, by_comparison);
+  ts_stack_remove_version(self->stack, version);
+}
+
 static StackVersion ts_parser__reduce(
   TSParser *self,
   StackVersion version,
@@ -1075,6 +1141,7 @@ static StackVersion ts_parser__reduce(
     // Allow the maximum version count to be temporarily exceeded, but only
     // by a limited threshold.
     if (slice_version > MAX_VERSION_COUNT + MAX_VERSION_COUNT_OVERFLOW + halted_version_count) {
+      ts_parser__note_drop(self, slice_version, false, false);
       ts_stack_remove_version(self->stack, slice_version);
       ts_subtree_array_delete(&self->tree_pool, &slice.subtrees);
       removed_version_count++;
@@ -1503,6 +1570,7 @@ static void ts_parser__recover(
 
   // Don't pursue this additional strategy if there are already too many stack versions.
   if (did_recover && ts_stack_version_count(self->stack) > MAX_VERSION_COUNT) {
+    ts_parser__note_drop(self, version, false, false);
     ts_stack_halt(self->stack, version);
     ts_subtree_release(&self->tree_pool, lookahead);
     return;
@@ -2031,7 +2099,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
       switch (ts_parser__compare_versions(self, status_j, status_i)) {
         case ErrorComparisonTakeLeft:
           made_changes = true;
-          ts_stack_remove_version(self->stack, i);
+          ts_parser__drop_version(self, i, true);
           i--;
           j = i;
           break;
@@ -2057,7 +2125,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
 
         case ErrorComparisonTakeRight:
           made_changes = true;
-          ts_stack_remove_version(self->stack, j);
+          ts_parser__drop_version(self, j, true);
           i--;
           j--;
           break;
@@ -2068,7 +2136,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
   // Enforce a hard upper bound on the number of stack versions by
   // discarding the least promising versions.
   while (ts_stack_version_count(self->stack) > MAX_VERSION_COUNT) {
-    ts_stack_remove_version(self->stack, MAX_VERSION_COUNT);
+    ts_parser__drop_version(self, MAX_VERSION_COUNT, false);
     made_changes = true;
   }
 
@@ -2086,7 +2154,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
           ts_parser__handle_error(self, i, lookahead);
           has_unpaused_version = true;
         } else {
-          ts_stack_remove_version(self->stack, i);
+          ts_parser__drop_version(self, i, true);
           made_changes = true;
           i--;
           n--;

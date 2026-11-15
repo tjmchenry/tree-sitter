@@ -2877,3 +2877,35 @@ fn test_parsing_after_editing_text_before_readings_that_merge_and_split_again() 
     assert_reparse_matches_fresh_parse(&language, code, &[edit]);
     assert_reparse_matches_fresh_parse(&language, code, &[edit, undo]);
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_an_ambiguity_the_version_cap_settled() {
+    // Without `)`, recovery keeps two copies of each version alive into the body, the version cap
+    // discards the `template_type` reading of `L<M<M>{}`, and the body is reduced by one version.
+    assert_reparse_matches_fresh_parse(
+        &get_language("cpp"),
+        b"class{H<>({::L<M<M>{};}};",
+        &[(10, 0, b")")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_a_recovery_an_error_cost_comparison_settled() {
+    // At the `}` after `let`, a version that recovered to an earlier state is cheaper than the one
+    // still skipping tokens, which is dropped, and the second `block` is reduced by one version.
+    // Without the first block's `}`, the skipping version closes the inner block and wins.
+    assert_reparse_matches_fresh_parse(
+        &get_language("rust"),
+        b"async{}async{let}0;}",
+        &[(6, 1, b"")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_a_drop_past_a_missing_token() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_a_drop_past_a_missing_token"),
+        b"xazxa}}}}(}xa(xa;",
+        &[(0, 2, b""), (0, 0, b"xa")],
+    );
+}

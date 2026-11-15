@@ -20,6 +20,17 @@ typedef struct {
 } StackSlice;
 typedef Array(StackSlice) StackSliceArray;
 
+// A place in the stack: where a stack node is, for comparing it with others on the way down. Stack
+// nodes further on in the text are past it. A token with no width, such as a missing one, leaves a
+// stack node at the byte of the one below it, so at one byte the node count tells them apart, and
+// where the token has no visible node either, the number of such stack nodes directly below (`rank`).
+// A node count of `UINT32_MAX` puts the place past every stack node at its byte.
+typedef struct {
+  uint32_t byte;
+  uint32_t node_count;
+  uint32_t rank;
+} StackPlace;
+
 typedef struct {
   Length position;
   uint32_t depth;
@@ -46,6 +57,9 @@ TSStateId ts_stack_state(const Stack *self, StackVersion version);
 // Get the last external token associated with a given version of the stack.
 Subtree ts_stack_last_external_token(const Stack *self, StackVersion version);
 
+// Get the place of the last stack node that two versions share.
+StackPlace ts_stack_divergence(const Stack *self, StackVersion version1, StackVersion version2);
+
 // Find the last external token in the subtrees on a given version of the stack.
 Subtree ts_stack_find_last_external_token(const Stack *self, StackVersion version);
 
@@ -70,6 +84,17 @@ void ts_stack_keep_lex_state_below_extras(Stack *, StackVersion);
 
 // Whether a node reduced from the top of this version would depend on text before its start.
 bool ts_stack_has_context(const Stack *, StackVersion);
+
+// Record that the stack nodes of a version that lie past a place in the stack, and before a byte,
+// carry such a dependency.
+void ts_stack_add_context(Stack *, StackVersion, StackPlace start, uint32_t end);
+
+// Whether one place is past another.
+static inline bool ts_stack_place_is_past(StackPlace self, StackPlace other) {
+  if (self.byte != other.byte) return self.byte > other.byte;
+  if (self.node_count != other.node_count) return self.node_count > other.node_count;
+  return self.rank > other.rank;
+}
 
 // A pop that follows merged paths down to different stack nodes splits them into versions again.
 // Which of those go on was decided by readings that had split off before the stack nodes between

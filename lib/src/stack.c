@@ -39,10 +39,13 @@ struct StackNode {
   StackLink links[MAX_LINK_COUNT];
   uint16_t link_count;
   bool has_context;
+  uint8_t context_start_rank;
   uint32_t ref_count;
   uint32_t error_cost;
   uint32_t node_count;
   int32_t dynamic_precedence;
+  uint32_t context_start;
+  uint32_t context_start_node_count;
   uint32_t between_serial;
 };
 
@@ -128,6 +131,59 @@ recur:
   if (first_predecessor) {
     self = first_predecessor;
     goto recur;
+  }
+}
+
+static StackPlace stack_node__place(const StackNode *node) {
+  StackPlace place = {node->position.bytes, node->node_count, 0};
+  while (node->link_count > 0) {
+    node = node->links[0].node;
+    if (node->position.bytes != place.byte || node->node_count != place.node_count) break;
+    place.rank++;
+  }
+  return place;
+}
+
+static inline bool stack_node__is_past(const StackNode *node, StackPlace place) {
+  if (node->position.bytes != place.byte) return node->position.bytes > place.byte;
+  if (node->node_count != place.node_count) return node->node_count > place.node_count;
+  return stack_node__place(node).rank > place.rank;
+}
+
+// Each walk that marks stack nodes leaves its start in them: `context_start` is its byte plus one,
+// and a rank of `UINT8_MAX` stands for `UINT32_MAX`. Such a node has nothing unmarked below it past
+// that place.
+static inline StackPlace stack_node__context_start(const StackNode *node) {
+  return (StackPlace) {
+    node->context_start - 1,
+    node->context_start_node_count,
+    node->context_start_rank == UINT8_MAX ? UINT32_MAX : node->context_start_rank,
+  };
+}
+
+// Mark every stack node at or below `node` that lies past a place in the stack and before a byte. A
+// node that is reduced later from a marked stack node depends on text before its start.
+//
+// A walk stops at a stack node that an earlier walk, which started no further on, has marked.
+static void stack_node_add_context(StackNode *node, const StackPlace *start, uint32_t end) {
+  while (stack_node__is_past(node, *start)) {
+    if (
+      node->context_start > 0 &&
+      !ts_stack_place_is_past(stack_node__context_start(node), *start)
+    ) return;
+    if (node->position.bytes < end) {
+      node->has_context = true;
+      if (start->rank < UINT8_MAX || start->rank == UINT32_MAX) {
+        node->context_start = start->byte + 1;
+        node->context_start_node_count = start->node_count;
+        node->context_start_rank = start->rank == UINT32_MAX ? UINT8_MAX : (uint8_t)start->rank;
+      }
+    }
+    if (node->link_count == 0) return;
+    for (uint32_t i = 1; i < node->link_count; i++) {
+      stack_node_add_context(node->links[i].node, start, end);
+    }
+    node = node->links[0].node;
   }
 }
 
@@ -263,6 +319,12 @@ static void stack_node_add_link(
   uint32_t node_count = link.node->node_count;
   int32_t dynamic_precedence = link.node->dynamic_precedence;
   self->links[self->link_count++] = link;
+
+  // Keep what this node's mark promises about the nodes below it.
+  if (self->context_start > 0) {
+    StackPlace start = stack_node__context_start(self);
+    stack_node_add_context(link.node, &start, self->position.bytes);
+  }
 
   if (link.subtree.ptr) {
     ts_subtree_retain(link.subtree);
@@ -534,6 +596,11 @@ bool ts_stack_has_context(const Stack *self, StackVersion version) {
   return array_get(&self->heads, version)->node->has_context;
 }
 
+TS_STACK_NOINLINE void ts_stack_add_context(Stack *self, StackVersion version, StackPlace start, uint32_t end) {
+  if (end <= start.byte) return;
+  stack_node_add_context(array_get(&self->heads, version)->node, &start, end);
+}
+
 static bool stack_node__is_above_at_byte(const StackNode *node, const StackNode *other) {
   if (node->node_count != other->node_count) return node->node_count > other->node_count;
   for (const StackNode *below = other; below->link_count > 0;) {
@@ -679,6 +746,27 @@ forceinline StackAction pop_pending_callback(void *payload, const StackIterator 
   } else {
     return StackActionNone;
   }
+}
+
+TS_STACK_NOINLINE StackPlace ts_stack_divergence(
+  const Stack *self,
+  StackVersion version1,
+  StackVersion version2
+) {
+  const StackNode *node1 = array_get(&self->heads, version1)->node;
+  const StackNode *node2 = array_get(&self->heads, version2)->node;
+  while (node1 != node2) {
+    if (stack_node__is_above(node1, node2) && node1->link_count > 0) {
+      node1 = node1->links[0].node;
+    } else if (node2->link_count > 0) {
+      node2 = node2->links[0].node;
+    } else if (node1->link_count > 0) {
+      node1 = node1->links[0].node;
+    } else {
+      return (StackPlace) {0, 0, 0};
+    }
+  }
+  return stack_node__place(node1);
 }
 
 Subtree ts_stack_find_last_external_token(const Stack *self, StackVersion version) {
