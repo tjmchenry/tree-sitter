@@ -3063,3 +3063,14 @@ fn test_parsing_after_editing_text_before_a_node_whose_first_token_is_lexed_agai
         &[(23, 0, b" +"), (23, 2, b""), (49, 3, b"a"), (49, 1, b"/a/")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_whose_tokens_are_reused_while_the_stack_is_split() {
+    // At the top level of a Go file the stack stays split from one declaration to the next, so the
+    // comment lines after the edit are taken from the old tree as tokens, not as nodes.
+    assert_reparse_matches_fresh_parse(
+        &get_language("go"),
+        b"package a\n\nvar x = 1\n// one\n// two\nvar y = 2\n// three\nfunc f() {}\n",
+        &[(19, 0, b"0"), (19, 1, b""), (15, 1, b"z"), (41, 3, b"")],
+    );
+}

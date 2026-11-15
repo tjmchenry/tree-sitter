@@ -92,6 +92,14 @@ typedef struct {
 #define TS_NOINLINE __attribute__((noinline))
 #endif
 
+// What a version may take from the old tree: nodes while it is the only version, and tokens while
+// there are others.
+typedef enum {
+  ParseReuseNone = 0,
+  ParseReuseTokens = 1,
+  ParseReuseNodes = 2,
+} ParseReuse;
+
 struct TSParser {
   Lexer lexer;
   Stack *stack;
@@ -118,6 +126,8 @@ struct TSParser {
   bool canceled_balancing;
   bool has_error;
   bool breakdown_rewound;
+  uint32_t refused_token_position;
+  TSStateId refused_token_state;
   uint32_t lexed_extent;
   // The state in which the version being advanced lexes its lookahead. A node it reduces records it.
   TSStateId lex_state;
@@ -1973,7 +1983,17 @@ static void ts_parser__handle_error(
   // the lexer needed to look ahead beyond the content of the token in order to
   // recognize it.
   if (ts_subtree_child_count(lookahead) > 0) {
-    ts_parser__breakdown_lookahead(self, &lookahead, ERROR_STATE, &self->reusable_node);
+    if (reusable_node_tree(&self->reusable_node).ptr == lookahead.ptr) {
+      ts_parser__breakdown_lookahead(self, &lookahead, ERROR_STATE, &self->reusable_node);
+    } else {
+      // Since this version paused on a node of the old tree, another version has taken tokens from
+      // that tree and moved the reusable node on. Recover with the first leaf of the paused node.
+      Subtree leaf = lookahead;
+      while (ts_subtree_child_count(leaf) > 0) leaf = ts_subtree_children(leaf)[0];
+      ts_subtree_retain(leaf);
+      ts_subtree_release(&self->tree_pool, lookahead);
+      lookahead = leaf;
+    }
   }
   ts_parser__recover(self, version, lookahead);
 
@@ -1999,6 +2019,82 @@ static bool ts_parser__check_progress(TSParser *self, Subtree *lookahead, const 
     return false;
   }
   return true;
+}
+
+// While the stack has more than one version, no node of the old tree is reused, because where a node
+// ends can depend on what the other versions do. A token is different: an old token that the lexer
+// would give again here stands in for the lex, for whichever version comes to its position first.
+// The token cache gets it, as it would get a lexed token, so the other versions find it there.
+static TS_NOINLINE Subtree ts_parser__reuse_token(
+  TSParser *self,
+  TSStateId state,
+  TSStateId lex_state,
+  uint32_t position,
+  Subtree last_external_token,
+  TableEntry *table_entry
+) {
+  uint32_t depth = self->reusable_node.stack.size;
+  TSLexerMode lex_mode = ts_language_lex_mode_for_state(self->language, lex_state);
+  TSLexerMode leaf_lex_mode;
+  Subtree result;
+
+  // The old token at this position was lexed in another lex mode: another version found that out.
+  if (position == self->refused_token_position) {
+    leaf_lex_mode = ts_language_lex_mode_for_state(self->language, self->refused_token_state);
+    if (
+      leaf_lex_mode.lex_state != lex_mode.lex_state ||
+      leaf_lex_mode.external_lex_state != lex_mode.external_lex_state ||
+      leaf_lex_mode.reserved_word_set_id != lex_mode.reserved_word_set_id
+    ) return NULL_SUBTREE;
+  }
+
+  while ((result = reusable_node_tree(&self->reusable_node)).ptr) {
+    uint32_t byte_offset = reusable_node_byte_offset(&self->reusable_node);
+    uint32_t end_byte_offset = byte_offset + ts_subtree_total_bytes(result);
+    if (byte_offset > position) return NULL_SUBTREE;
+
+    if (byte_offset < position) {
+      if (end_byte_offset <= position || !reusable_node_descend(&self->reusable_node)) {
+        reusable_node_advance(&self->reusable_node);
+      }
+      depth = self->reusable_node.stack.size;
+      continue;
+    }
+
+    if (ts_subtree_has_changes(result)) break;
+    if (reusable_node_descend(&self->reusable_node)) continue;
+
+    // A token lexed in another lex mode is refused below, whatever the parse table holds for it.
+    self->refused_token_position = position;
+    self->refused_token_state = ts_subtree_leaf_parse_state(result);
+    leaf_lex_mode = ts_language_lex_mode_for_state(self->language, self->refused_token_state);
+    if (
+      ts_subtree_size(result).bytes == 0 ||
+      ts_subtree_is_error(result) ||
+      ts_subtree_missing(result) ||
+      ts_subtree_is_fragile(result) ||
+      leaf_lex_mode.lex_state != lex_mode.lex_state ||
+      leaf_lex_mode.external_lex_state != lex_mode.external_lex_state ||
+      leaf_lex_mode.reserved_word_set_id != lex_mode.reserved_word_set_id ||
+      !ts_subtree_external_scanner_state_eq(self->reusable_node.last_external_token, last_external_token) ||
+      ts_parser__has_included_range_difference(
+        self, byte_offset, end_byte_offset + ts_subtree_lookahead_bytes(result)
+      )
+    ) break;
+
+    ts_language_table_entry(self->language, state, ts_subtree_symbol(result), table_entry);
+    if (!ts_parser__can_reuse_first_leaf(self, state, lex_state, result, table_entry, true)) break;
+
+    LOG("reuse_token symbol:%s", TREE_NAME(result));
+    ts_parser__cache_reused_leaf(self, position, last_external_token, result);
+    ts_subtree_retain(result);
+    reusable_node_advance(&self->reusable_node);
+    return result;
+  }
+
+  // The old tree's node at this position stays where it was for when one version is left.
+  if (self->reusable_node.stack.size > depth) self->reusable_node.stack.size = depth;
+  return NULL_SUBTREE;
 }
 
 // A fresh parse lexes the token after a node before reducing it, in the state the node's last leaf
@@ -2033,7 +2129,7 @@ static TS_NOINLINE void ts_parser__read_lex_state(TSParser *self, StackVersion v
 static bool ts_parser__advance(
   TSParser *self,
   StackVersion version,
-  bool allow_node_reuse
+  ParseReuse reuse
 ) {
   TSStateId state = ts_stack_state(self->stack, version);
   uint32_t position = ts_stack_position(self->stack, version).bytes;
@@ -2045,7 +2141,7 @@ static bool ts_parser__advance(
   TableEntry table_entry = {.action_count = 0};
 
   // If possible, reuse a node from the previous syntax tree.
-  if (allow_node_reuse) {
+  if (reuse == ParseReuseNodes) {
     lookahead = ts_parser__reuse_node(
       self, version, &state, &self->lex_state, position, last_external_token, &table_entry, &did_reuse
     );
@@ -2061,6 +2157,11 @@ static bool ts_parser__advance(
     lookahead = ts_parser__get_cached_token(
       self, state, self->lex_state, position, last_external_token, &table_entry
     );
+    if (!lookahead.ptr && reuse == ParseReuseTokens) {
+      lookahead = ts_parser__reuse_token(
+        self, state, self->lex_state, position, last_external_token, &table_entry
+      );
+    }
   }
 
   bool needs_lex = !lookahead.ptr;
@@ -2663,6 +2764,7 @@ TSTree *ts_parser_parse(
         &self->included_range_differences
       );
       reusable_node_reset(&self->reusable_node, old_tree->root);
+      self->refused_token_position = UINT32_MAX;
       LOG("parse_after_edit");
       LOG_TREE(self->old_tree);
       for (uint32_t i = 0; i < self->included_range_differences.size; i++) {
@@ -2675,6 +2777,7 @@ TSTree *ts_parser_parse(
     }
   }
 
+  uint32_t has_old_tree = self->old_tree.ptr != NULL;
   uint32_t position = 0, last_position = 0, version_count = 0;
   do {
     for (
@@ -2683,7 +2786,7 @@ TSTree *ts_parser_parse(
       version < version_count;
       version++
     ) {
-      bool allow_node_reuse = version_count == 1;
+      ParseReuse reuse = (ParseReuse)(has_old_tree << (version_count == 1));
       while (ts_stack_is_active(self->stack, version)) {
         LOG(
           "process version:%u, version_count:%u, state:%d, row:%u, col:%u",
@@ -2695,7 +2798,7 @@ TSTree *ts_parser_parse(
         );
 
         uint32_t position_before_advance = ts_stack_position(self->stack, version).bytes;
-        if (!ts_parser__advance(self, version, allow_node_reuse)) {
+        if (!ts_parser__advance(self, version, reuse)) {
           if (self->has_scanner_error) goto exit;
           return NULL;
         }
