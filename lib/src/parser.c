@@ -538,6 +538,7 @@ static Subtree ts_parser__lex(
   const Subtree external_token = ts_stack_last_external_token(self->stack, version);
 
   bool found_external_token = false;
+  bool ignored_empty_external_token = false;
   bool error_mode = parse_state == ERROR_STATE;
   bool skipped_error = false;
   bool called_get_column = false;
@@ -593,6 +594,7 @@ static Subtree ts_parser__lex(
           TSStateId next_parse_state = ts_language_next_state(self->language, parse_state, symbol);
           bool token_is_extra = (next_parse_state == parse_state);
           if (error_mode || !ts_stack_has_advanced_since_error(self->stack, version) || token_is_extra) {
+            if (!error_mode && !token_is_extra) ignored_empty_external_token = true;
             LOG(
               "ignore_empty_external_token symbol:%s",
               SYM_NAME(self->language->external_scanner.symbol_map[self->lexer.data.result_symbol])
@@ -701,6 +703,9 @@ static Subtree ts_parser__lex(
       called_get_column,
       is_keyword,
       false,
+      // An empty token that was ignored because this version hasn't advanced since an error isn't
+      // ignored in other places, so a token lexed in its place is fragile.
+      ignored_empty_external_token,
       self->language
     );
 

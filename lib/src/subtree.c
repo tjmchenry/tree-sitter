@@ -167,16 +167,17 @@ Subtree ts_subtree_new_leaf(
   SubtreePool *pool, TSSymbol symbol, Length padding, Length size,
   uint32_t lookahead_bytes, TSStateId parse_state,
   bool has_external_tokens, bool depends_on_column,
-  bool is_keyword, bool is_missing, const TSLanguage *language
+  bool is_keyword, bool is_missing, bool is_fragile, const TSLanguage *language
 ) {
   TSSymbolMetadata metadata = ts_language_symbol_metadata(language, symbol);
   bool extra = symbol == ts_builtin_sym_end;
+  is_fragile = is_fragile || is_missing;
 
   bool is_inline = (
     symbol <= UINT8_MAX &&
     !has_external_tokens &&
-    // A missing token is fragile, and inline subtrees can't be.
-    !is_missing &&
+    // Inline subtrees can't be fragile.
+    !is_fragile &&
     ts_subtree_can_inline(padding, size, lookahead_bytes)
   );
 
@@ -212,8 +213,8 @@ Subtree ts_subtree_new_leaf(
       .visible = metadata.visible,
       .named = metadata.named,
       .extra = extra,
-      .fragile_left = is_missing,
-      .fragile_right = is_missing,
+      .fragile_left = is_fragile,
+      .fragile_right = is_fragile,
       .has_changes = false,
       .has_external_tokens = has_external_tokens,
       .has_external_scanner_state_change = false,
@@ -250,7 +251,7 @@ Subtree ts_subtree_new_error(
 ) {
   Subtree result = ts_subtree_new_leaf(
     pool, ts_builtin_sym_error, padding, size, bytes_scanned,
-    parse_state, false, false, false, false, language
+    parse_state, false, false, false, false, false, language
   );
   SubtreeHeapData *data = (SubtreeHeapData *)result.ptr;
   data->fragile_left = true;
@@ -571,7 +572,7 @@ Subtree ts_subtree_new_missing_leaf(
 ) {
   return ts_subtree_new_leaf(
     pool, symbol, padding, length_zero(), lookahead_bytes,
-    state, false, false, false,  true, language
+    state, false, false, false,  true, false, language
   );
 }
 

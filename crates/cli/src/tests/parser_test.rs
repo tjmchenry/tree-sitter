@@ -2748,3 +2748,11 @@ fn test_parsing_after_editing_text_before_a_token_reused_in_another_lex_mode() {
         &[(24, 1, b"")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_where_an_ignored_empty_external_token_was_lexed_over() {
+    // `d(()` ends in an error, and a version that hasn't advanced since the error ignores the empty
+    // `_line_break` at the last newline and lexes the end of the input over it. Without `d`, a
+    // fresh parse lexes the line break there, so that token must not be reused.
+    assert_reparse_matches_fresh_parse(&get_language("ruby"), b"o\nd(()\n", &[(2, 1, b"")]);
+}
