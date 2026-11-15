@@ -2817,3 +2817,42 @@ fn test_parsing_after_editing_text_after_a_reused_node_lexed_in_its_last_state()
         &[(4, 0, b"{")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_a_version_that_read_below_a_node() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_a_version_read_below_its_start"),
+        b"xa(c}}x(c(}x(yz}axcaa}",
+        &[(9, 0, b"c")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_into_a_state_where_the_stack_splits() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_where_another_state_would_split"),
+        b"),)))ba;bb)yy;zyba",
+        &[(1, 1, b""), (1, 0, b",")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_a_reduction_past_a_trailing_error() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_a_reduction_past_a_trailing_error"),
+        b"xzyxxzyzyzzzzyzy;zyx",
+        &[(0, 1, b"")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_a_node_another_version_popped_past() {
+    // The error at `;` splits the stack, and a statement block is reduced by one version from a
+    // stack node that another version had popped past. With `{` in front, the block must not be
+    // reused.
+    assert_reparse_matches_fresh_parse(
+        &get_language("javascript"),
+        b"if(''){x={;}}",
+        &[(0, 0, b"{")],
+    );
+}

@@ -68,6 +68,13 @@ void ts_stack_keep_lex_state(Stack *, StackVersion, TSStateId lex_state_below);
 // Set it for the extras on top of a version to what it is below them.
 void ts_stack_keep_lex_state_below_extras(Stack *, StackVersion);
 
+// Whether a node reduced from the top of this version would depend on text before its start.
+bool ts_stack_has_context(const Stack *, StackVersion);
+
+// Pop a given number of entries, like `ts_stack_pop_count`. With `marks`, record that dependency for
+// each stack node that was popped past: the popping version has read the stack below it.
+StackSliceArray ts_stack_pop_count_past(Stack *, StackVersion, uint32_t count, bool marks);
+
 // Push a tree and state onto the given version of the stack.
 //
 // This transfers ownership of the tree to the Stack. Callers that

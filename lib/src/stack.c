@@ -38,6 +38,7 @@ struct StackNode {
   Length position;
   StackLink links[MAX_LINK_COUNT];
   uint16_t link_count;
+  bool has_context;
   uint32_t ref_count;
   uint32_t error_cost;
   uint32_t node_count;
@@ -527,6 +528,10 @@ TS_STACK_NOINLINE void ts_stack_keep_lex_state(Stack *self, StackVersion version
   node->lex_state = lex_state ? lex_state : node->state;
 }
 
+bool ts_stack_has_context(const Stack *self, StackVersion version) {
+  return array_get(&self->heads, version)->node->has_context;
+}
+
 Subtree ts_stack_last_external_token(const Stack *self, StackVersion version) {
   return array_get(&self->heads, version)->last_external_token;
 }
@@ -581,6 +586,23 @@ forceinline StackAction pop_count_callback(void *payload, const StackIterator *i
 
 StackSliceArray ts_stack_pop_count(Stack *self, StackVersion version, uint32_t count) {
   return stack__iter(self, version, pop_count_callback, &count, (int32_t)count);
+}
+
+typedef struct {
+  uint32_t goal_subtree_count;
+  bool marks;
+} PopCountPastPayload;
+
+static inline StackAction pop_count_past_callback(void *payload, const StackIterator *iterator) {
+  PopCountPastPayload *pop = payload;
+  if (iterator->subtree_count == pop->goal_subtree_count) return StackActionPop | StackActionStop;
+  if (pop->marks) iterator->node->has_context = true;
+  return StackActionNone;
+}
+
+StackSliceArray ts_stack_pop_count_past(Stack *self, StackVersion version, uint32_t count, bool marks) {
+  PopCountPastPayload payload = {count, marks};
+  return stack__iter(self, version, pop_count_past_callback, &payload, (int32_t)count);
 }
 
 

@@ -882,6 +882,8 @@ static Subtree ts_parser__reuse_node(
       reason = "is_missing";
     } else if (ts_subtree_is_fragile(result)) {
       reason = "is_fragile";
+    } else if (ts_subtree_depends_on_context(result)) {
+      reason = "depends_on_context";
     } else if (ts_parser__has_included_range_difference(
                  self,
                  byte_offset,
@@ -1056,7 +1058,11 @@ static StackVersion ts_parser__reduce(
   // path back through the stack. For each path, create a new parent node to
   // contain the popped children, and push it onto the stack in place of the
   // children.
-  StackSliceArray pop = ts_stack_pop_count(self->stack, version, count);
+  // While another version or another action of this one may go on from the same stack, this version
+  // has read the stack below each stack node it pops past. If the other keeps one of those and this
+  // reading is lost, a node reduced from there later depends on that.
+  is_fragile = is_fragile || initial_version_count > 1;
+  StackSliceArray pop = ts_stack_pop_count_past(self->stack, version, count, is_fragile);
   uint32_t removed_version_count = 0;
   uint32_t halted_version_count = ts_stack_halted_version_count(self->stack);
   for (uint32_t i = 0; i < pop.size; i++) {
@@ -1126,12 +1132,15 @@ static StackVersion ts_parser__reduce(
       parent.ptr->extra = true;
     }
     parent.ptr->end_state = self->lex_state;
-    if (is_fragile || pop.size > 1 || initial_version_count > 1) {
+    if (is_fragile || pop.size > 1) {
       parent.ptr->fragile_left = true;
       parent.ptr->fragile_right = true;
       parent.ptr->parse_state = TS_TREE_STATE_NONE;
     } else {
       parent.ptr->parse_state = state;
+      if (ts_stack_has_context(self->stack, slice_version)) {
+        parent.ptr->depends_on_context = true;
+      }
     }
     parent.ptr->dynamic_precedence += dynamic_precedence;
 
@@ -1336,7 +1345,7 @@ static bool ts_parser__recover_to_state(
   uint32_t depth,
   TSStateId goal_state
 ) {
-  StackSliceArray pop = ts_stack_pop_count(self->stack, version, depth);
+  StackSliceArray pop = ts_stack_pop_count_past(self->stack, version, depth, true);
   StackVersion previous_version = STACK_VERSION_NONE;
 
   for (uint32_t i = 0; i < pop.size; i++) {

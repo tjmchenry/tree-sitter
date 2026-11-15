@@ -333,6 +333,7 @@ void ts_subtree_compress(
     ts_subtree_children(grandchild)[grandchild.ptr->child_count - 1] = ts_subtree_from_mut(child);
 
     grandchild.ptr->end_state = child.ptr->end_state;
+    grandchild.ptr->depends_on_context |= child.ptr->depends_on_context;
     array_push(stack, tree);
     tree = grandchild;
   }
