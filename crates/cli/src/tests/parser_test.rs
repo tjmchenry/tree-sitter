@@ -2728,3 +2728,23 @@ fn test_parsing_after_editing_text_that_recovery_puts_after_a_reused_node() {
         &[(16, 3, b"else")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_an_eof_lexed_in_another_lex_mode() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_eof_in_another_lex_mode"),
+        b"a w\n",
+        &[(0, 1, b"b")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_a_token_reused_in_another_lex_mode() {
+    // Without `=`, `a1` is followed by a state whose lex mode also matches `...`, though `...`
+    // isn't valid there. The `.` lexed after `= a1` must not be reused.
+    assert_reparse_matches_fresh_parse(
+        &get_language("go"),
+        b"\npackage main\n\nconst a1 = a1...]int{1, 2, 3}\n",
+        &[(24, 1, b"")],
+    );
+}

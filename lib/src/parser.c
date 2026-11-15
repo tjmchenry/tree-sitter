@@ -471,7 +471,8 @@ static bool ts_parser__can_reuse_first_leaf(
   TSParser *self,
   TSStateId state,
   Subtree tree,
-  TableEntry *table_entry
+  TableEntry *table_entry,
+  bool from_old_tree
 ) {
   TSSymbol leaf_symbol = ts_subtree_leaf_symbol(tree);
   TSStateId leaf_state = ts_subtree_leaf_parse_state(tree);
@@ -495,6 +496,17 @@ static bool ts_parser__can_reuse_first_leaf(
       (!ts_subtree_is_keyword(tree) && ts_subtree_parse_state(tree) == state)
     )
   ) return true;
+
+  // A token from the old tree that was lexed in another lex mode is not reusable, even where the
+  // generator marks the token reusable: this lex mode may lex its text as another token, because lex
+  // modes are shared between states and so can match tokens that aren't valid in this state.
+  if (
+    from_old_tree && (
+      leaf_lex_mode.lex_state != current_lex_mode.lex_state ||
+      leaf_lex_mode.external_lex_state != current_lex_mode.external_lex_state ||
+      leaf_lex_mode.reserved_word_set_id != current_lex_mode.reserved_word_set_id
+    )
+  ) return false;
 
   // Empty tokens are not reusable in states with different lookaheads.
   if (ts_subtree_size(tree).bytes == 0 && leaf_symbol != ts_builtin_sym_end) return false;
@@ -723,7 +735,7 @@ static Subtree ts_parser__get_cached_token(
     ts_subtree_external_scanner_state_eq(cache->last_external_token, last_external_token)
   ) {
     ts_language_table_entry(self->language, state, ts_subtree_symbol(cache->token), table_entry);
-    if (ts_parser__can_reuse_first_leaf(self, state, cache->token, table_entry)) {
+    if (ts_parser__can_reuse_first_leaf(self, state, cache->token, table_entry, false)) {
       ts_subtree_retain(cache->token);
       return cache->token;
     }
@@ -832,7 +844,7 @@ static Subtree ts_parser__reuse_node(
 
     TSSymbol leaf_symbol = ts_subtree_leaf_symbol(result);
     ts_language_table_entry(self->language, *state, leaf_symbol, table_entry);
-    if (!ts_parser__can_reuse_first_leaf(self, *state, result, table_entry)) {
+    if (!ts_parser__can_reuse_first_leaf(self, *state, result, table_entry, true)) {
       LOG(
         "cant_reuse_node symbol:%s, first_leaf_symbol:%s",
         TREE_NAME(result),
