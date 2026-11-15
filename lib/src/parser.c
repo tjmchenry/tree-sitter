@@ -657,16 +657,31 @@ static bool ts_parser__can_reuse_first_leaf(
   // the same thing happens when incrementally reparsing.
   if (current_lex_mode.lex_state == (uint16_t)(-1)) return false;
 
+  // A word token whose text is no keyword is the word wherever the lex mode gives it. One whose text
+  // is a keyword is the word only because of the states it was lexed and looked up in: that keyword
+  // was neither valid nor reserved in the first, or was not valid in the second. Only a node records
+  // both states.
+  bool is_reusable_word = true;
+  if (
+    leaf_symbol == self->language->keyword_capture_token &&
+    !(
+      ts_subtree_child_count(tree) > 0 &&
+      ts_subtree_parse_state(tree) == state &&
+      leaf_state == lex_state
+    )
+  ) {
+    Subtree leaf = tree;
+    while (ts_subtree_child_count(leaf) > 0) leaf = ts_subtree_children(leaf)[0];
+    if (ts_subtree_is_keyword(leaf)) is_reusable_word = false;
+  }
+
   // If the token was created in a state with the same set of lookaheads, it is reusable.
   if (
+    is_reusable_word &&
     table_entry->action_count > 0 &&
     leaf_lex_mode.lex_state == current_lex_mode.lex_state &&
     leaf_lex_mode.external_lex_state == current_lex_mode.external_lex_state &&
-    leaf_lex_mode.reserved_word_set_id == current_lex_mode.reserved_word_set_id &&
-    (
-      leaf_symbol != self->language->keyword_capture_token ||
-      (!ts_subtree_is_keyword(tree) && ts_subtree_parse_state(tree) == state)
-    )
+    leaf_lex_mode.reserved_word_set_id == current_lex_mode.reserved_word_set_id
   ) return true;
 
   // A token from the old tree that was lexed in another lex mode is not reusable, even where the

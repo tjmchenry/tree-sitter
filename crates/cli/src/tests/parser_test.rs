@@ -3019,3 +3019,36 @@ fn test_parsing_after_editing_text_before_a_rotated_repetition_that_starts_with_
         &[(1, 3, b"!\nr\nH *")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_a_word_token_in_another_parse_state() {
+    // With `var ` in front, `yy` is checked for reuse in another parse state, but in the same lex
+    // mode, and its text is no keyword. It is the same token there, so it isn't read again.
+    let mut parser = Parser::new();
+    parser.set_language(&get_language("javascript")).unwrap();
+    let mut code = b"x = yy + zz;\n".to_vec();
+    let mut tree = parser.parse(&code, None).unwrap();
+    perform_edit(
+        &mut tree,
+        &mut code,
+        &Edit {
+            position: 0,
+            deleted_length: 0,
+            inserted_text: b"var ".to_vec(),
+        },
+    )
+    .unwrap();
+
+    let mut recorder = ReadRecorder::new(&code);
+    let tree = parser
+        .parse_with_options(&mut |i, _| recorder.read(i), Some(&tree), None)
+        .unwrap();
+    let fresh = parser.parse(&code, None).unwrap();
+    assert_eq!(tree.root_node().to_sexp(), fresh.root_node().to_sexp());
+
+    let strings_read = recorder.strings_read();
+    assert!(
+        strings_read.iter().all(|s| !s.contains("yy")),
+        "{strings_read:?}"
+    );
+}
