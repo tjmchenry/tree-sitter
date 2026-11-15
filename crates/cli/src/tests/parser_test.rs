@@ -3052,3 +3052,14 @@ fn test_parsing_after_editing_text_before_a_word_token_in_another_parse_state() 
         "{strings_read:?}"
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_a_node_whose_first_token_is_lexed_again() {
+    // Each edit changes the state in which the token after it is lexed (`}` after `1` or after `+`,
+    // a regex or a division), so the nodes that follow are checked for reuse in another lex state.
+    assert_reparse_matches_fresh_parse(
+        &get_language("javascript"),
+        b"function f() { return 1 }\nfunction g() { return /a/ }\n",
+        &[(23, 0, b" +"), (23, 2, b""), (49, 3, b"a"), (49, 1, b"/a/")],
+    );
+}
