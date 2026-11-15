@@ -46,6 +46,9 @@ TSStateId ts_stack_state(const Stack *self, StackVersion version);
 // Get the last external token associated with a given version of the stack.
 Subtree ts_stack_last_external_token(const Stack *self, StackVersion version);
 
+// Find the last external token in the subtrees on a given version of the stack.
+Subtree ts_stack_find_last_external_token(const Stack *self, StackVersion version);
+
 // Set the last external token associated with a given version of the stack.
 void ts_stack_set_last_external_token(Stack *self, StackVersion version, Subtree token);
 

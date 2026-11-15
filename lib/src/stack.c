@@ -554,6 +554,18 @@ forceinline StackAction pop_pending_callback(void *payload, const StackIterator 
   }
 }
 
+Subtree ts_stack_find_last_external_token(const Stack *self, StackVersion version) {
+  const StackNode *node = array_get(&self->heads, version)->node;
+  while (node->link_count > 0) {
+    Subtree subtree = node->links[0].subtree;
+    if (subtree.ptr && ts_subtree_has_external_tokens(subtree)) {
+      return ts_subtree_last_external_token(subtree);
+    }
+    node = node->links[0].node;
+  }
+  return NULL_SUBTREE;
+}
+
 StackSliceArray ts_stack_pop_pending(Stack *self, StackVersion version) {
   StackSliceArray pop = stack__iter(self, version, pop_pending_callback, NULL, 0);
   if (pop.size > 0) {

@@ -111,6 +111,7 @@ struct TSParser {
   bool has_scanner_error;
   bool canceled_balancing;
   bool has_error;
+  bool breakdown_rewound;
 };
 
 typedef struct {
@@ -173,6 +174,20 @@ static void ts_parser__log(TSParser *self) {
   }
 }
 
+// Point the reusable node at `target`, a node of the old tree that starts at `position`.
+static void ts_parser__seek_reusable_node(TSParser *self, Subtree target, uint32_t position) {
+  if (!self->old_tree.ptr || ts_subtree_total_bytes(target) == 0) return;
+  reusable_node_reset(&self->reusable_node, self->old_tree);
+  Subtree tree;
+  while ((tree = reusable_node_tree(&self->reusable_node)).ptr && tree.ptr != target.ptr) {
+    uint32_t start = reusable_node_byte_offset(&self->reusable_node);
+    if (start > position) break;
+    if (start + ts_subtree_total_bytes(tree) <= position || !reusable_node_descend(&self->reusable_node)) {
+      reusable_node_advance(&self->reusable_node);
+    }
+  }
+}
+
 static bool ts_parser__breakdown_top_of_stack(
   TSParser *self,
   StackVersion version
@@ -190,9 +205,24 @@ static bool ts_parser__breakdown_top_of_stack(
       StackSlice slice = *array_get(&pop, i);
       TSStateId state = ts_stack_state(self->stack, slice.version);
       Subtree parent = *array_front(&slice.subtrees);
+      Subtree fragile_child = NULL_SUBTREE;
 
       for (uint32_t j = 0, n = ts_subtree_child_count(parent); j < n; j++) {
         Subtree child = ts_subtree_children(parent)[j];
+
+        // A child reduced while the stack was split holds the reading that won, and tokens after
+        // it may have decided that. Stop before such a child, so it and the rest of the parent are
+        // parsed again.
+        if (
+          j + 1 < n && ts_subtree_child_count(child) > 0 &&
+          ts_subtree_fragile_left(child) && ts_subtree_fragile_right(child) &&
+          !ts_subtree_is_error(child) && !ts_subtree_extra(child)
+        ) {
+          fragile_child = child;
+          pending = false;
+          break;
+        }
+
         pending = ts_subtree_child_count(child) > 0;
 
         if (ts_subtree_is_error(child)) {
@@ -205,9 +235,24 @@ static bool ts_parser__breakdown_top_of_stack(
         ts_stack_push(self->stack, slice.version, child, pending, state);
       }
 
-      for (uint32_t j = 1; j < slice.subtrees.size; j++) {
-        Subtree tree = *array_get(&slice.subtrees, j);
-        ts_stack_push(self->stack, slice.version, tree, false, state);
+      if (fragile_child.ptr) {
+        for (uint32_t j = 1; j < slice.subtrees.size; j++) {
+          ts_subtree_release(&self->tree_pool, *array_get(&slice.subtrees, j));
+        }
+        ts_stack_set_last_external_token(
+          self->stack, slice.version,
+          ts_stack_find_last_external_token(self->stack, slice.version)
+        );
+        ts_parser__seek_reusable_node(
+          self, fragile_child, ts_stack_position(self->stack, slice.version).bytes
+        );
+        self->breakdown_rewound = true;
+        LOG("breakdown_stop_before_fragile_child tree:%s", TREE_NAME(fragile_child));
+      } else {
+        for (uint32_t j = 1; j < slice.subtrees.size; j++) {
+          Subtree tree = *array_get(&slice.subtrees, j);
+          ts_stack_push(self->stack, slice.version, tree, false, state);
+        }
       }
 
       ts_subtree_release(&self->tree_pool, parent);
@@ -838,11 +883,13 @@ static Subtree ts_parser__reuse_node(
         reusable_node_advance(&self->reusable_node);
         ts_parser__breakdown_top_of_stack(self, version);
         *state = ts_stack_state(self->stack, version);
+        if (self->breakdown_rewound) break;
       } else if (ts_subtree_extra(result)) {
         // Inside a non-terminal extra, a breakdown can't reach a reused node before the extra, so
         // break that node down now: where it ends depended on the token after the extra.
         ts_parser__breakdown_top_of_stack(self, version);
         *state = ts_stack_state(self->stack, version);
+        if (self->breakdown_rewound) break;
       }
       continue;
     }
@@ -861,6 +908,7 @@ static Subtree ts_parser__reuse_node(
         // couldn't reach that node either. So break it down now.
         ts_parser__breakdown_top_of_stack(self, version);
         *state = ts_stack_state(self->stack, version);
+        if (self->breakdown_rewound) break;
       }
       reusable_node_advance_past_leaf(&self->reusable_node);
       break;
@@ -1652,6 +1700,9 @@ static bool ts_parser__advance(
     lookahead = ts_parser__reuse_node(
       self, version, &state, position, last_external_token, &table_entry
     );
+
+    // A breakdown moved this version back. The parse loop resumes it from there.
+    if (self->breakdown_rewound) return true;
   }
 
   // If no node from the previous syntax tree could be reused, then try to
@@ -1862,8 +1913,9 @@ static bool ts_parser__advance(
     // reuse that previous subtree. Remove it from the stack, and in its place,
     // push each of its children. Then try again to process the current lookahead.
     if (ts_parser__breakdown_top_of_stack(self, version)) {
-      state = ts_stack_state(self->stack, version);
       ts_subtree_release(&self->tree_pool, lookahead);
+      if (self->breakdown_rewound) return true;
+      state = ts_stack_state(self->stack, version);
       needs_lex = true;
       continue;
     }
@@ -2183,6 +2235,7 @@ void ts_parser_reset(TSParser *self) {
   self->has_scanner_error = false;
   self->has_error = false;
   self->canceled_balancing = false;
+  self->breakdown_rewound = false;
   self->parse_options = (TSParseOptions) {0};
   self->parse_state = (TSParseState) {0};
 }
@@ -2264,12 +2317,21 @@ TSTree *ts_parser_parse(
 
         LOG_STACK();
 
+        position = ts_stack_position(self->stack, version).bytes;
+
+        // A version moved back by a breakdown advances again from where it now is, in step with the
+        // other versions.
+        if (self->breakdown_rewound) {
+          self->breakdown_rewound = false;
+          last_position = position;
+          continue;
+        }
+
         // Stop processing this version once it's past `last_position`, the furthest position any
         // version has reached, or, for versions after the first, once this advance moved it to
         // `last_position`. Shifting a zero-width token there doesn't move it, so it keeps going to
         // the next token, as the first version does. Otherwise the stack could be condensed first,
         // and the nodes this version then reduces on that token wouldn't be marked fragile.
-        position = ts_stack_position(self->stack, version).bytes;
         if (
           position > last_position ||
           (version > 0 && position == last_position && position > position_before_advance)

@@ -2699,6 +2699,45 @@ fn preorder_nodes(root: tree_sitter::Node) -> Vec<(String, std::ops::Range<usize
     }
 }
 
+/// Applies all `edits` before one reparse, then undoes them in reverse order before another, and
+/// asserts after each reparse that the tree is the one a fresh parse of the text gives, node for
+/// node.
+fn assert_reparses_match_fresh_parse_after_edits_and_their_undo(
+    language: &tree_sitter::Language,
+    code: &[u8],
+    edits: &[(usize, usize, &[u8])],
+) {
+    let mut parser = Parser::new();
+    parser.set_language(language).unwrap();
+    let mut code = code.to_vec();
+    let mut tree = parser.parse(&code, None).unwrap();
+    let mut undo = Vec::new();
+    for &(position, deleted_length, inserted_text) in edits {
+        let edit = Edit {
+            position,
+            deleted_length,
+            inserted_text: inserted_text.to_vec(),
+        };
+        undo.push(invert_edit(&code, &edit));
+        perform_edit(&mut tree, &mut code, &edit).unwrap();
+    }
+    for round in 0..2 {
+        if round == 1 {
+            for edit in undo.iter().rev() {
+                perform_edit(&mut tree, &mut code, edit).unwrap();
+            }
+        }
+        tree = parser.parse(&code, Some(&tree)).unwrap();
+        let fresh = parser.parse(&code, None).unwrap();
+        assert_eq!(
+            preorder_nodes(fresh.root_node()),
+            preorder_nodes(tree.root_node()),
+            "{:?}",
+            String::from_utf8_lossy(&code)
+        );
+    }
+}
+
 #[test]
 fn test_parsing_after_editing_the_last_byte_of_a_multibyte_lookahead_character() {
     // The comment ends at U+2028, a line terminator. Changing that character's last byte makes it
@@ -2755,4 +2794,16 @@ fn test_parsing_after_editing_text_where_an_ignored_empty_external_token_was_lex
     // `_line_break` at the last newline and lexes the end of the input over it. Without `d`, a
     // fresh parse lexes the line break there, so that token must not be reused.
     assert_reparse_matches_fresh_parse(&get_language("ruby"), b"o\nd(()\n", &[(2, 1, b"")]);
+}
+
+#[test]
+fn test_parsing_after_editing_text_that_breaks_down_a_node_with_a_fragile_child() {
+    // Without the `;`, the `N` in `L<N>` is reduced as an `expression` while the stack is split.
+    // Putting the `;` back reuses `<N>`, and the error after it breaks that down, which must not
+    // push the `expression` back whole.
+    assert_reparses_match_fresh_parse_after_edits_and_their_undo(
+        &get_language("cpp"),
+        b"{L>l=K<M<>>{};\n  typename K::template L<N>>t",
+        &[(13, 1, b"")],
+    );
 }
