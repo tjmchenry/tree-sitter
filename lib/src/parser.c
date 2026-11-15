@@ -1695,6 +1695,21 @@ static bool ts_parser__advance(
             LOG("shift state:%u", next_state);
           }
 
+          // Nodes are only reused while there is one stack version. If processing this one split
+          // the stack, shift only the reused node's first leaf, so the versions advance together.
+          if (did_reuse && ts_stack_version_count(self->stack) > 1) {
+            if (ts_subtree_child_count(lookahead) > 0) {
+              LOG("shift_first_leaf_of_reused_node tree:%s", TREE_NAME(lookahead));
+              while (ts_subtree_child_count(reusable_node_tree(&self->reusable_node)) > 0) {
+                reusable_node_descend(&self->reusable_node);
+              }
+              Subtree leaf = reusable_node_tree(&self->reusable_node);
+              ts_subtree_retain(leaf);
+              ts_subtree_release(&self->tree_pool, lookahead);
+              lookahead = leaf;
+            }
+          }
+
           if (ts_subtree_child_count(lookahead) > 0) {
             ts_parser__breakdown_lookahead(self, &lookahead, state, &self->reusable_node);
             next_state = ts_language_next_state(self->language, state, ts_subtree_symbol(lookahead));

@@ -2709,3 +2709,13 @@ fn test_parsing_after_editing_the_last_byte_of_a_multibyte_lookahead_character()
         &[(10, 1, b"\xa7")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_a_node_reused_while_the_stack_splits() {
+    // After `->`, `product` splits the stack, and `n();if()r;` was one reused node.
+    assert_reparse_matches_fresh_parse(
+        &get_language("c"),
+        b"{r:t=t->n();if()r;}",
+        &[(8, 0, b"product ")],
+    );
+}
