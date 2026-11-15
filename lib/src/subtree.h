@@ -142,6 +142,7 @@ typedef struct {
         TSSymbol symbol;
         TSStateId parse_state;
       } first_leaf;
+      TSStateId end_state;
     };
 
     // External terminal subtrees (`child_count == 0 && has_external_tokens`)

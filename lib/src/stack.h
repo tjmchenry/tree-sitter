@@ -55,6 +55,19 @@ void ts_stack_set_last_external_token(Stack *self, StackVersion version, Subtree
 // Get the position of the given version of the stack within the document.
 Length ts_stack_position(const Stack *, StackVersion);
 
+// Get or set the state in which the next token of a version is lexed. It is the state on top of the
+// stack, except after a node reused whole from an old tree, and after extras that follow one: there
+// it is the state that node recorded.
+TSStateId ts_stack_lex_state(const Stack *, StackVersion);
+void ts_stack_set_lex_state(Stack *, StackVersion, TSStateId);
+
+// Set it for the subtree just pushed onto a version, given what it was before the push: a node reused
+// whole sets the state it recorded, and an extra keeps what was there.
+void ts_stack_keep_lex_state(Stack *, StackVersion, TSStateId lex_state_below);
+
+// Set it for the extras on top of a version to what it is below them.
+void ts_stack_keep_lex_state_below_extras(Stack *, StackVersion);
+
 // Push a tree and state onto the given version of the stack.
 //
 // This transfers ownership of the tree to the Stack. Callers that

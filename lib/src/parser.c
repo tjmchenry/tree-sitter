@@ -86,6 +86,12 @@ typedef struct {
   uint32_t byte_index;
 } TokenCache;
 
+#ifdef _MSC_VER
+#define TS_NOINLINE __declspec(noinline)
+#else
+#define TS_NOINLINE __attribute__((noinline))
+#endif
+
 struct TSParser {
   Lexer lexer;
   Stack *stack;
@@ -112,6 +118,8 @@ struct TSParser {
   bool canceled_balancing;
   bool has_error;
   bool breakdown_rewound;
+  // The state in which the version being advanced lexes its lookahead. A node it reduces records it.
+  TSStateId lex_state;
 };
 
 typedef struct {
@@ -232,7 +240,9 @@ static bool ts_parser__breakdown_top_of_stack(
         }
 
         ts_subtree_retain(child);
+        TSStateId lex_state = ts_stack_lex_state(self->stack, slice.version);
         ts_stack_push(self->stack, slice.version, child, pending, state);
+        ts_stack_keep_lex_state(self->stack, slice.version, lex_state);
       }
 
       if (fragile_child.ptr) {
@@ -251,7 +261,9 @@ static bool ts_parser__breakdown_top_of_stack(
       } else {
         for (uint32_t j = 1; j < slice.subtrees.size; j++) {
           Subtree tree = *array_get(&slice.subtrees, j);
+          TSStateId lex_state = ts_stack_lex_state(self->stack, slice.version);
           ts_stack_push(self->stack, slice.version, tree, false, state);
+          ts_stack_keep_lex_state(self->stack, slice.version, lex_state);
         }
       }
 
@@ -515,13 +527,14 @@ static bool ts_parser__external_scanner_scan(
 static bool ts_parser__can_reuse_first_leaf(
   TSParser *self,
   TSStateId state,
+  TSStateId lex_state,
   Subtree tree,
   TableEntry *table_entry,
   bool from_old_tree
 ) {
   TSSymbol leaf_symbol = ts_subtree_leaf_symbol(tree);
   TSStateId leaf_state = ts_subtree_leaf_parse_state(tree);
-  TSLexerMode current_lex_mode = ts_language_lex_mode_for_state(self->language, state);
+  TSLexerMode current_lex_mode = ts_language_lex_mode_for_state(self->language, lex_state);
   TSLexerMode leaf_lex_mode = ts_language_lex_mode_for_state(self->language, leaf_state);
 
   // At the end of a non-terminal extra node, the lexer normally returns
@@ -775,6 +788,7 @@ static Subtree ts_parser__lex(
 static Subtree ts_parser__get_cached_token(
   TSParser *self,
   TSStateId state,
+  TSStateId lex_state,
   uint32_t position,
   Subtree last_external_token,
   TableEntry *table_entry
@@ -785,7 +799,7 @@ static Subtree ts_parser__get_cached_token(
     ts_subtree_external_scanner_state_eq(cache->last_external_token, last_external_token)
   ) {
     ts_language_table_entry(self->language, state, ts_subtree_symbol(cache->token), table_entry);
-    if (ts_parser__can_reuse_first_leaf(self, state, cache->token, table_entry, false)) {
+    if (ts_parser__can_reuse_first_leaf(self, state, lex_state, cache->token, table_entry, false)) {
       ts_subtree_retain(cache->token);
       return cache->token;
     }
@@ -826,6 +840,7 @@ static Subtree ts_parser__reuse_node(
   TSParser *self,
   StackVersion version,
   TSStateId *state,
+  TSStateId *lex_state,
   uint32_t position,
   Subtree last_external_token,
   TableEntry *table_entry
@@ -883,12 +898,14 @@ static Subtree ts_parser__reuse_node(
         reusable_node_advance(&self->reusable_node);
         ts_parser__breakdown_top_of_stack(self, version);
         *state = ts_stack_state(self->stack, version);
+        *lex_state = ts_stack_lex_state(self->stack, version);
         if (self->breakdown_rewound) break;
       } else if (ts_subtree_extra(result)) {
         // Inside a non-terminal extra, a breakdown can't reach a reused node before the extra, so
         // break that node down now: where it ends depended on the token after the extra.
         ts_parser__breakdown_top_of_stack(self, version);
         *state = ts_stack_state(self->stack, version);
+        *lex_state = ts_stack_lex_state(self->stack, version);
         if (self->breakdown_rewound) break;
       }
       continue;
@@ -896,7 +913,7 @@ static Subtree ts_parser__reuse_node(
 
     TSSymbol leaf_symbol = ts_subtree_leaf_symbol(result);
     ts_language_table_entry(self->language, *state, leaf_symbol, table_entry);
-    if (!ts_parser__can_reuse_first_leaf(self, *state, result, table_entry, true)) {
+    if (!ts_parser__can_reuse_first_leaf(self, *state, *lex_state, result, table_entry, true)) {
       LOG(
         "cant_reuse_node symbol:%s, first_leaf_symbol:%s",
         TREE_NAME(result),
@@ -908,6 +925,7 @@ static Subtree ts_parser__reuse_node(
         // couldn't reach that node either. So break it down now.
         ts_parser__breakdown_top_of_stack(self, version);
         *state = ts_stack_state(self->stack, version);
+        *lex_state = ts_stack_lex_state(self->stack, version);
         if (self->breakdown_rewound) break;
       }
       reusable_node_advance_past_leaf(&self->reusable_node);
@@ -1107,6 +1125,7 @@ static StackVersion ts_parser__reduce(
     if (end_of_non_terminal_extra && next_state == state) {
       parent.ptr->extra = true;
     }
+    parent.ptr->end_state = self->lex_state;
     if (is_fragile || pop.size > 1 || initial_version_count > 1) {
       parent.ptr->fragile_left = true;
       parent.ptr->fragile_right = true;
@@ -1225,6 +1244,8 @@ static bool ts_parser__do_all_potential_reductions(
   StackVersion starting_version,
   TSSymbol lookahead_symbol
 ) {
+  // The nodes reduced here record no lex state.
+  self->lex_state = 0;
   uint32_t initial_version_count = ts_stack_version_count(self->stack);
 
   bool can_shift_lookahead_symbol = false;
@@ -1366,7 +1387,9 @@ static bool ts_parser__recover_to_state(
 
     for (uint32_t j = 0; j < self->trailing_extras.size; j++) {
       Subtree tree = *array_get(&self->trailing_extras, j);
+      TSStateId lex_state = ts_stack_lex_state(self->stack, slice.version);
       ts_stack_push(self->stack, slice.version, tree, false, goal_state);
+      ts_stack_keep_lex_state(self->stack, slice.version, lex_state);
     }
 
     previous_version = slice.version;
@@ -1682,6 +1705,35 @@ static bool ts_parser__check_progress(TSParser *self, Subtree *lookahead, const 
   return true;
 }
 
+// A fresh parse lexes the token after a node before reducing it, in the state the node's last leaf
+// left, and it lexes whatever follows an extra in the state before the extra. So after a node reused
+// whole from an old tree, the next token is lexed in the state the node recorded, and an extra
+// pushed on top of the stack keeps the lex state of the stack below it.
+static TS_NOINLINE void ts_parser__set_lex_state_after_shift(
+  TSParser *self,
+  StackVersion version,
+  Subtree lookahead
+) {
+  if (ts_subtree_child_count(lookahead) == 0) {
+    ts_stack_set_lex_state(self->stack, version, self->lex_state);
+  } else if (ts_subtree_extra(lookahead)) {
+    ts_stack_keep_lex_state(self->stack, version, self->lex_state);
+  } else {
+    ts_stack_set_lex_state(self->stack, version, lookahead.ptr->end_state);
+  }
+}
+
+static TS_NOINLINE void ts_parser__keep_lex_states_below_extras(TSParser *self, StackVersion version) {
+  for (StackVersion i = 0, n = ts_stack_version_count(self->stack); i < n; i++) {
+    ts_stack_keep_lex_state_below_extras(self->stack, i);
+  }
+  self->lex_state = ts_stack_lex_state(self->stack, version);
+}
+
+static TS_NOINLINE void ts_parser__read_lex_state(TSParser *self, StackVersion version) {
+  self->lex_state = ts_stack_lex_state(self->stack, version);
+}
+
 static bool ts_parser__advance(
   TSParser *self,
   StackVersion version,
@@ -1690,6 +1742,7 @@ static bool ts_parser__advance(
   TSStateId state = ts_stack_state(self->stack, version);
   uint32_t position = ts_stack_position(self->stack, version).bytes;
   Subtree last_external_token = ts_stack_last_external_token(self->stack, version);
+  self->lex_state = ts_stack_lex_state(self->stack, version);
 
   bool did_reuse = true;
   Subtree lookahead = NULL_SUBTREE;
@@ -1698,7 +1751,7 @@ static bool ts_parser__advance(
   // If possible, reuse a node from the previous syntax tree.
   if (allow_node_reuse) {
     lookahead = ts_parser__reuse_node(
-      self, version, &state, position, last_external_token, &table_entry
+      self, version, &state, &self->lex_state, position, last_external_token, &table_entry
     );
 
     // A breakdown moved this version back. The parse loop resumes it from there.
@@ -1710,7 +1763,7 @@ static bool ts_parser__advance(
   if (!lookahead.ptr) {
     did_reuse = false;
     lookahead = ts_parser__get_cached_token(
-      self, state, position, last_external_token, &table_entry
+      self, state, self->lex_state, position, last_external_token, &table_entry
     );
   }
 
@@ -1719,7 +1772,7 @@ static bool ts_parser__advance(
     // Otherwise, re-run the lexer.
     if (needs_lex) {
       needs_lex = false;
-      lookahead = ts_parser__lex(self, version, state);
+      lookahead = ts_parser__lex(self, version, self->lex_state);
       if (self->has_scanner_error) return false;
 
       if (lookahead.ptr) {
@@ -1784,6 +1837,12 @@ static bool ts_parser__advance(
           }
 
           ts_parser__shift(self, version, next_state, lookahead, action.shift.extra);
+
+          // The token after a node reused whole is lexed in the state the node recorded, and an
+          // extra keeps the lex state of the stack below it.
+          if ((did_reuse && ts_subtree_child_count(lookahead) > 0) || (action.shift.extra && self->lex_state != state)) {
+            ts_parser__set_lex_state_after_shift(self, version, lookahead);
+          }
           if (did_reuse) reusable_node_advance(&self->reusable_node);
           return true;
         }
@@ -1840,6 +1899,8 @@ static bool ts_parser__advance(
       // on the current parse state.
       if (!lookahead.ptr) {
         needs_lex = true;
+        // A non-terminal extra, and the extras after it, keep the lex state of the stack below.
+        ts_parser__keep_lex_states_below_extras(self, version);
       } else {
         ts_language_table_entry(
           self->language,
@@ -1916,6 +1977,7 @@ static bool ts_parser__advance(
       ts_subtree_release(&self->tree_pool, lookahead);
       if (self->breakdown_rewound) return true;
       state = ts_stack_state(self->stack, version);
+      ts_parser__read_lex_state(self, version);
       needs_lex = true;
       continue;
     }

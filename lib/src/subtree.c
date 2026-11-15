@@ -331,6 +331,8 @@ void ts_subtree_compress(
     ts_subtree_children(tree)[0] = ts_subtree_from_mut(grandchild);
     ts_subtree_children(child)[0] = ts_subtree_children(grandchild)[grandchild.ptr->child_count - 1];
     ts_subtree_children(grandchild)[grandchild.ptr->child_count - 1] = ts_subtree_from_mut(child);
+
+    grandchild.ptr->end_state = child.ptr->end_state;
     array_push(stack, tree);
     tree = grandchild;
   }

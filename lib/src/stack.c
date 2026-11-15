@@ -18,6 +18,12 @@
 #define forceinline static inline __attribute__((always_inline))
 #endif
 
+#ifdef _MSC_VER
+#define TS_STACK_NOINLINE __declspec(noinline)
+#else
+#define TS_STACK_NOINLINE __attribute__((noinline))
+#endif
+
 typedef struct StackNode StackNode;
 
 typedef struct {
@@ -28,6 +34,7 @@ typedef struct {
 
 struct StackNode {
   TSStateId state;
+  TSStateId lex_state;
   Length position;
   StackLink links[MAX_LINK_COUNT];
   uint16_t link_count;
@@ -148,7 +155,8 @@ static StackNode *stack_node_new(
   *node = (StackNode) {
     .ref_count = 1,
     .link_count = 0,
-    .state = state
+    .state = state,
+    .lex_state = state,
   };
 
   if (previous_node) {
@@ -477,6 +485,46 @@ TSStateId ts_stack_state(const Stack *self, StackVersion version) {
 
 Length ts_stack_position(const Stack *self, StackVersion version) {
   return array_get(&self->heads, version)->node->position;
+}
+
+TSStateId ts_stack_lex_state(const Stack *self, StackVersion version) {
+  const StackNode *node = array_get(&self->heads, version)->node;
+  return node->lex_state;
+}
+
+void ts_stack_set_lex_state(Stack *self, StackVersion version, TSStateId state) {
+  StackNode *node = array_get(&self->heads, version)->node;
+  node->lex_state = state ? state : node->state;
+}
+
+TS_STACK_NOINLINE void ts_stack_keep_lex_state_below_extras(Stack *self, StackVersion version) {
+  StackNode *top = array_get(&self->heads, version)->node, *node = top;
+  while (
+    node->link_count > 0 && node->links[0].subtree.ptr &&
+    ts_subtree_extra(node->links[0].subtree) && !ts_subtree_is_error(node->links[0].subtree)
+  ) {
+    node = node->links[0].node;
+  }
+  TSStateId lex_state = node->lex_state;
+  for (StackNode *extra = top; extra != node; extra = extra->links[0].node) {
+    extra->lex_state = lex_state ? lex_state : extra->state;
+  }
+}
+
+TS_STACK_NOINLINE void ts_stack_keep_lex_state(Stack *self, StackVersion version, TSStateId lex_state_below) {
+  StackNode *node = array_get(&self->heads, version)->node;
+  if (node->link_count == 0) return;
+  StackLink link = node->links[0];
+  if (!link.subtree.ptr) return;
+  TSStateId lex_state;
+  if (ts_subtree_extra(link.subtree) && !ts_subtree_is_error(link.subtree)) {
+    lex_state = lex_state_below;
+  } else if (link.is_pending) {
+    lex_state = link.subtree.ptr->end_state;
+  } else {
+    return;
+  }
+  node->lex_state = lex_state ? lex_state : node->state;
 }
 
 Subtree ts_stack_last_external_token(const Stack *self, StackVersion version) {

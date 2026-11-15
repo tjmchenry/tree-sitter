@@ -550,7 +550,8 @@ fn test_parsing_after_editing_end_of_code() {
         )
     );
 
-    assert_eq!(recorder.strings_read(), vec![" * ", "abc.d)",]);
+    // The `*` after the reused `x` is reused too: it was lexed in the state that `x` left.
+    assert_eq!(recorder.strings_read(), vec![" abc.d)"]);
 }
 
 #[test]
@@ -2805,5 +2806,14 @@ fn test_parsing_after_editing_text_that_breaks_down_a_node_with_a_fragile_child(
         &get_language("cpp"),
         b"{L>l=K<M<>>{};\n  typename K::template L<N>>t",
         &[(13, 1, b"")],
+    );
+}
+
+#[test]
+fn test_parsing_after_editing_text_after_a_reused_node_lexed_in_its_last_state() {
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_lexing_after_a_reused_node"),
+        b",zx{,y",
+        &[(4, 0, b"{")],
     );
 }
