@@ -2643,3 +2643,69 @@ fn test_parsing_after_balancing_tree_that_depends_on_column() {
         fresh.root_node().to_sexp()
     );
 }
+
+/// Applies `edits` one at a time, reparsing after each, and asserts that the last tree is the one a
+/// fresh parse of the text gives, node for node.
+fn assert_reparse_matches_fresh_parse(
+    language: &tree_sitter::Language,
+    code: &[u8],
+    edits: &[(usize, usize, &[u8])],
+) {
+    let mut parser = Parser::new();
+    parser.set_language(language).unwrap();
+    let mut code = code.to_vec();
+    let mut tree = parser.parse(&code, None).unwrap();
+    for &(position, deleted_length, inserted_text) in edits {
+        perform_edit(
+            &mut tree,
+            &mut code,
+            &Edit {
+                position,
+                deleted_length,
+                inserted_text: inserted_text.to_vec(),
+            },
+        )
+        .unwrap();
+        tree = parser.parse(&code, Some(&tree)).unwrap();
+    }
+    let fresh = parser.parse(&code, None).unwrap();
+    assert_eq!(
+        preorder_nodes(fresh.root_node()),
+        preorder_nodes(tree.root_node()),
+        "{:?}",
+        String::from_utf8_lossy(&code)
+    );
+}
+
+/// Every node in pre-order: its kind, its byte range, and whether it is missing.
+fn preorder_nodes(root: tree_sitter::Node) -> Vec<(String, std::ops::Range<usize>, bool)> {
+    let mut nodes = Vec::new();
+    let mut cursor = root.walk();
+    loop {
+        let node = cursor.node();
+        nodes.push((
+            node.kind().to_string(),
+            node.byte_range(),
+            node.is_missing(),
+        ));
+        if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return nodes;
+            }
+        }
+    }
+}
+
+#[test]
+fn test_parsing_after_editing_the_last_byte_of_a_multibyte_lookahead_character() {
+    // The comment ends at U+2028, a line terminator. Changing that character's last byte makes it
+    // U+2027, which the comment takes in.
+    assert_reparse_matches_fresh_parse(
+        &get_language("javascript"),
+        "x = [ //\u{2028}\n]\n".as_bytes(),
+        &[(10, 1, b"\xa7")],
+    );
+}
