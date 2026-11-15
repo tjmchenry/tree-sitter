@@ -118,6 +118,7 @@ struct TSParser {
   bool canceled_balancing;
   bool has_error;
   bool breakdown_rewound;
+  uint32_t lexed_extent;
   // The state in which the version being advanced lexes its lookahead. A node it reduces records it.
   TSStateId lex_state;
 };
@@ -1087,7 +1088,8 @@ static bool ts_parser__select_tree(TSParser *self, Subtree left, Subtree right) 
 static bool ts_parser__select_children(
   TSParser *self,
   Subtree left,
-  const SubtreeArray *children
+  const SubtreeArray *children,
+  uint32_t *lookahead_end
 ) {
   array_assign(&self->scratch_trees, children);
 
@@ -1101,6 +1103,11 @@ static bool ts_parser__select_children(
     0,
     self->language
   );
+
+  // Whichever is selected, the other was lexed too.
+  *lookahead_end = ts_subtree_total_bytes(left) + ts_subtree_lookahead_bytes(left);
+  uint32_t scratch_end = ts_subtree_total_bytes(ts_subtree_from_mut(scratch_tree)) + scratch_tree.ptr->lookahead_bytes;
+  if (scratch_end > *lookahead_end) *lookahead_end = scratch_end;
 
   return ts_parser__select_tree(
     self,
@@ -1132,9 +1139,29 @@ static void ts_parser__shift(
   }
 }
 
+// What a version lexed decided whether it survived, and it may reach further than the tokens of the
+// version that does. When a version's reading is lost, the furthest byte its lexer read is kept, and
+// the version left at the end is made to look ahead that far.
+static TS_NOINLINE void ts_parser__note_lookahead(TSParser *self, Subtree lookahead, uint32_t position) {
+  if (lookahead.ptr) {
+    uint32_t extent = position + ts_subtree_total_bytes(lookahead) + ts_subtree_lookahead_bytes(lookahead);
+    if (extent > self->lexed_extent) self->lexed_extent = extent;
+  }
+}
+
+static TS_NOINLINE void ts_parser__note_lexed(TSParser *self, StackVersion version) {
+  uint32_t extent = ts_stack_lexed_extent(self->stack, version);
+  if (extent > self->lexed_extent) self->lexed_extent = extent;
+}
+
+static void ts_parser__remove_version(TSParser *self, StackVersion version) {
+  ts_parser__note_lexed(self, version);
+  ts_stack_remove_version(self->stack, version);
+}
+
 static TS_NOINLINE void ts_parser__drop_version(TSParser *self, StackVersion version, bool by_comparison) {
   ts_parser__note_drop(self, version, false, by_comparison);
-  ts_stack_remove_version(self->stack, version);
+  ts_parser__remove_version(self, version);
 }
 
 static StackVersion ts_parser__reduce(
@@ -1172,6 +1199,7 @@ static StackVersion ts_parser__reduce(
     // by a limited threshold.
     if (slice_version > MAX_VERSION_COUNT + MAX_VERSION_COUNT_OVERFLOW + halted_version_count) {
       ts_parser__note_drop(self, slice_version, false, false);
+      ts_parser__note_lexed(self, version);
       ts_stack_remove_version(self->stack, slice_version);
       ts_subtree_array_delete(&self->tree_pool, &slice.subtrees);
       removed_version_count++;
@@ -1207,10 +1235,12 @@ static StackVersion ts_parser__reduce(
       SubtreeArray next_slice_children = next_slice.subtrees;
       ts_subtree_array_remove_trailing_extras(&next_slice_children, &self->trailing_extras2);
 
+      uint32_t lookahead_end;
       if (ts_parser__select_children(
         self,
         ts_subtree_from_mut(parent),
-        &next_slice_children
+        &next_slice_children,
+        &lookahead_end
       )) {
         ts_subtree_array_clear(&self->tree_pool, &self->trailing_extras);
         ts_subtree_release(&self->tree_pool, ts_subtree_from_mut(parent));
@@ -1222,6 +1252,8 @@ static StackVersion ts_parser__reduce(
         array_clear(&self->trailing_extras2);
         ts_subtree_array_delete(&self->tree_pool, &next_slice.subtrees);
       }
+      uint32_t end = ts_subtree_total_bytes(ts_subtree_from_mut(parent)) + parent.ptr->lookahead_bytes;
+      if (lookahead_end > end) parent.ptr->lookahead_bytes += lookahead_end - end;
     }
 
     TSStateId state = ts_stack_state(self->stack, slice_version);
@@ -1314,6 +1346,7 @@ static void ts_parser__accept(
   }
 
   ts_stack_remove_version(self->stack, array_get(&pop, 0)->version);
+  ts_parser__note_lexed(self, version);
   ts_stack_halt(self->stack, version);
 }
 
@@ -1421,7 +1454,7 @@ static bool ts_parser__do_all_potential_reductions(
       ts_stack_renumber_version(self->stack, reduction_version, version);
       continue;
     } else if (lookahead_symbol != 0) {
-      ts_stack_remove_version(self->stack, version);
+      ts_parser__remove_version(self, version);
       // Removing this version shifts the next reduction version into its slot.
       // Check that version before advancing.
       continue;
@@ -1515,6 +1548,9 @@ static void ts_parser__recover(
   uint32_t previous_version_count = ts_stack_version_count(self->stack);
   Length position = ts_stack_position(self->stack, version);
   StackSummary *summary = ts_stack_get_summary(self->stack, version);
+
+  // Whether this version survives depends on this token, however far the lexer read for it.
+  ts_parser__note_lookahead(self, lookahead, position.bytes);
   uint32_t node_count_since_error = ts_stack_node_count_since_error(self->stack, version);
   uint32_t current_error_cost = ts_stack_error_cost(self->stack, version);
 
@@ -1607,6 +1643,7 @@ static void ts_parser__recover(
   // Don't pursue this additional strategy if there are already too many stack versions.
   if (did_recover && ts_stack_version_count(self->stack) > MAX_VERSION_COUNT) {
     ts_parser__note_drop(self, version, false, false);
+    ts_parser__note_lexed(self, version);
     ts_stack_halt(self->stack, version);
     ts_subtree_release(&self->tree_pool, lookahead);
     return;
@@ -1616,6 +1653,7 @@ static void ts_parser__recover(
     did_recover &&
     ts_subtree_has_external_scanner_state_change(lookahead)
   ) {
+    ts_parser__note_lexed(self, version);
     ts_stack_halt(self->stack, version);
     ts_subtree_release(&self->tree_pool, lookahead);
     return;
@@ -1627,6 +1665,7 @@ static void ts_parser__recover(
     ts_subtree_total_bytes(lookahead) * ERROR_COST_PER_SKIPPED_CHAR +
     ts_subtree_total_size(lookahead).extent.row * ERROR_COST_PER_SKIPPED_LINE;
   if (ts_parser__better_version_exists(self, version, false, new_cost)) {
+    ts_parser__note_lexed(self, version);
     ts_stack_halt(self->stack, version);
     ts_subtree_release(&self->tree_pool, lookahead);
     return;
@@ -2032,6 +2071,7 @@ static bool ts_parser__advance(
     // This version can be discarded.
     if (did_reduce) {
       if (lookahead.ptr) {
+        ts_parser__note_lookahead(self, lookahead, position);
         ts_subtree_release(&self->tree_pool, lookahead);
       }
       ts_stack_halt(self->stack, version);
@@ -2108,12 +2148,21 @@ static bool ts_parser__advance(
   }
 }
 
+static TS_NOINLINE void ts_parser__end_competition(TSParser *self) {
+  if (self->lexed_extent > ts_stack_position(self->stack, 0).bytes) {
+    ts_stack_extend_lookahead(self->stack, 0, self->lexed_extent);
+  }
+  self->lexed_extent = 0;
+}
+
 static uint32_t ts_parser__condense_stack(TSParser *self) {
   bool made_changes = false;
+  bool removed_version = false;
   uint32_t min_error_cost = UINT32_MAX;
   for (StackVersion i = 0; i < ts_stack_version_count(self->stack); i++) {
     // Prune any versions that have been marked for removal.
     if (ts_stack_is_halted(self->stack, i)) {
+      removed_version = true;
       ts_stack_remove_version(self->stack, i);
       i--;
       continue;
@@ -2137,6 +2186,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
       switch (ts_parser__compare_versions(self, status_j, status_i)) {
         case ErrorComparisonTakeLeft:
           made_changes = true;
+          removed_version = true;
           ts_parser__drop_version(self, i, true);
           i--;
           j = i;
@@ -2146,6 +2196,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
         case ErrorComparisonNone:
           if (ts_stack_merge(self->stack, j, i)) {
             made_changes = true;
+          removed_version = true;
             i--;
             j = i;
           }
@@ -2153,6 +2204,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
 
         case ErrorComparisonPreferRight:
           made_changes = true;
+          removed_version = true;
           if (ts_stack_merge(self->stack, j, i)) {
             i--;
             j = i;
@@ -2164,6 +2216,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
 
         case ErrorComparisonTakeRight:
           made_changes = true;
+          removed_version = true;
           ts_parser__drop_version(self, j, true);
           if (version_i > j) version_i--;
           i--;
@@ -2178,6 +2231,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
   while (ts_stack_version_count(self->stack) > MAX_VERSION_COUNT) {
     ts_parser__drop_version(self, MAX_VERSION_COUNT, false);
     made_changes = true;
+    removed_version = true;
   }
 
   // If the best-performing stack version is currently paused, or all
@@ -2196,6 +2250,7 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
         } else {
           ts_parser__drop_version(self, i, true);
           made_changes = true;
+          removed_version = true;
           i--;
           n--;
         }
@@ -2203,6 +2258,12 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
         has_unpaused_version = true;
       }
     }
+  }
+
+  // Once one version is left, the nodes it reduces are no longer fragile. Those that span what the
+  // dropped versions parsed must look ahead as far as any of them lexed.
+  if (removed_version && ts_stack_version_count(self->stack) == 1 && self->lexed_extent) {
+    ts_parser__end_competition(self);
   }
 
   if (made_changes) {
@@ -2417,6 +2478,7 @@ void ts_parser_reset(TSParser *self) {
   self->has_error = false;
   self->canceled_balancing = false;
   self->breakdown_rewound = false;
+  self->lexed_extent = 0;
   self->parse_options = (TSParseOptions) {0};
   self->parse_state = (TSParseState) {0};
 }

@@ -2972,3 +2972,16 @@ fn test_parsing_after_editing_text_before_a_node_reduced_above_examined_states()
         &[(3, 2, b"")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_a_dropped_version_lexed() {
+    // Recovering from the stray `c`, one version lexes a word that reaches the `"` at byte 178 and
+    // is then dropped. The case statement reduced afterwards must look ahead that far.
+    assert_reparse_matches_fresh_parse(
+        &get_language("bash"),
+        BASH_CASE_STATEMENTS,
+        &[(178, 1, b""), (178, 0, b"\"")],
+    );
+}
+
+const BASH_CASE_STATEMENTS: &[u8] = b"\ncase \"opt\" in\n  a)\n    echo a\n    ;;\n\n  b)\n    echo b\n    ;&\n\n  c)\n    echo c;;\nc\n\ncase \"opt\" in\n  (a)\n    echo a\n    ;;\n\n  (b)\n    echo b\n    ;&\n\n  (c)\n    echo c;;\nesac\n\ncase \"$Z\" in\n  ab*|cd*) ef\nesac\n\ncase $dest in\n  *.[1357])\n    exit $?\n    ;;\nesac\n\ncase x in x) echo meow ;; esac\n\ncase foo in\n  bar\\ baz) : ;;\nesac\n\ncase \"$arg\" in\n  *([0-9])([0-9])) echo \"$arg\"\nesac\n\ncase ${lang} in\nCMakeLists.txt | \\\n\tcmake_modules | \\\n\t${PN}.pot) ;;\n*) rm -r ${lang} || die ;;\nesac\n";

@@ -218,6 +218,7 @@ Subtree ts_subtree_new_missing_leaf(
   const TSLanguage *language
 );
 MutableSubtree ts_subtree_make_mut(SubtreePool *pool, Subtree self);
+Subtree ts_subtree_with_lookahead_bytes(SubtreePool *pool, Subtree self, uint32_t lookahead_bytes);
 void ts_subtree_retain(Subtree self);
 void ts_subtree_release(SubtreePool *pool, Subtree self);
 int32_t ts_subtree_compare(Subtree left, Subtree right, SubtreePool *pool);

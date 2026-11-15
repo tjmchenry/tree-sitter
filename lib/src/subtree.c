@@ -285,6 +285,36 @@ MutableSubtree ts_subtree_clone(Subtree self) {
 // This takes ownership of the subtree. If the subtree has only one owner,
 // this will directly convert it into a mutable version. Otherwise, it will
 // perform a copy.
+Subtree ts_subtree_with_lookahead_bytes(SubtreePool *pool, Subtree self, uint32_t lookahead_bytes) {
+  MutableSubtree result = ts_subtree_make_mut(pool, self);
+  if (result.data.is_inline) {
+    if (lookahead_bytes < 16) {
+      result.data.lookahead_bytes = lookahead_bytes;
+    } else {
+      SubtreeHeapData *data = ts_subtree_pool_allocate(pool);
+      *data = (SubtreeHeapData) {
+        .ref_count = 1,
+        .padding = ts_subtree_padding(self),
+        .size = ts_subtree_size(self),
+        .lookahead_bytes = lookahead_bytes,
+        .symbol = result.data.symbol,
+        .parse_state = result.data.parse_state,
+        .visible = result.data.visible,
+        .named = result.data.named,
+        .extra = result.data.extra,
+        .has_changes = result.data.has_changes,
+        .depends_on_column = result.data.depends_on_column,
+        .is_missing = result.data.is_missing,
+        .is_keyword = result.data.is_keyword,
+      };
+      result.ptr = data;
+    }
+  } else {
+    result.ptr->lookahead_bytes = lookahead_bytes;
+  }
+  return ts_subtree_from_mut(result);
+}
+
 MutableSubtree ts_subtree_make_mut(SubtreePool *pool, Subtree self) {
   if (self.data.is_inline) return (MutableSubtree) {self.data};
   if (self.ptr->ref_count == 1) return ts_subtree_to_mut_unsafe(self);

@@ -118,6 +118,14 @@ void ts_stack_add_context_between(Stack *, const StackSliceArray *);
 // each stack node that was popped past: the popping version has read the stack below it.
 StackSliceArray ts_stack_pop_count_past(Stack *, StackVersion, uint32_t count, bool marks);
 
+// Get the furthest byte that the lexer read for the subtrees that only this version holds, and for
+// the lookahead it paused on.
+uint32_t ts_stack_lexed_extent(const Stack *, StackVersion);
+
+// Make the last subtree below any extras on top of a version's stack look ahead up to a given byte,
+// so that every node reduced over it later does too.
+void ts_stack_extend_lookahead(Stack *, StackVersion, uint32_t end);
+
 // Push a tree and state onto the given version of the stack.
 //
 // This transfers ownership of the tree to the Stack. Callers that

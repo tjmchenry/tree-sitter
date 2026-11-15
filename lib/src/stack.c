@@ -280,6 +280,11 @@ static void stack_node_add_link(
       // the special case where two links directly connect the same pair of nodes,
       // we can safely remove the ambiguity ahead of time without changing behavior.
       if (existing_link->node == link.node) {
+        // Whichever is kept, the other was lexed too.
+        uint32_t lookahead_bytes = link.subtree.ptr ? ts_subtree_lookahead_bytes(link.subtree) : 0;
+        if (existing_link->subtree.ptr && ts_subtree_lookahead_bytes(existing_link->subtree) > lookahead_bytes) {
+          lookahead_bytes = ts_subtree_lookahead_bytes(existing_link->subtree);
+        }
         if (
           ts_subtree_dynamic_precedence(link.subtree) >
           ts_subtree_dynamic_precedence(existing_link->subtree)
@@ -289,6 +294,11 @@ static void stack_node_add_link(
           existing_link->subtree = link.subtree;
           self->dynamic_precedence =
             link.node->dynamic_precedence + ts_subtree_dynamic_precedence(link.subtree);
+        }
+        if (existing_link->subtree.ptr && ts_subtree_lookahead_bytes(existing_link->subtree) < lookahead_bytes) {
+          existing_link->subtree = ts_subtree_with_lookahead_bytes(
+            subtree_pool, existing_link->subtree, lookahead_bytes
+          );
         }
         return;
       }
@@ -314,7 +324,19 @@ static void stack_node_add_link(
     }
   }
 
-  if (self->link_count == MAX_LINK_COUNT) return;
+  if (self->link_count == MAX_LINK_COUNT) {
+    // This reading is lost, but it was lexed too.
+    StackLink *first_link = &self->links[0];
+    if (
+      link.subtree.ptr && first_link->subtree.ptr &&
+      ts_subtree_lookahead_bytes(link.subtree) > ts_subtree_lookahead_bytes(first_link->subtree)
+    ) {
+      first_link->subtree = ts_subtree_with_lookahead_bytes(
+        subtree_pool, first_link->subtree, ts_subtree_lookahead_bytes(link.subtree)
+      );
+    }
+    return;
+  }
 
   stack_node_retain(link.node);
   uint32_t node_count = link.node->node_count;
@@ -721,6 +743,59 @@ TS_STACK_NOINLINE void ts_stack_add_context_between(Stack *self, const StackSlic
 
   // The node the chains share is not marked, but stands for this walk in a later pop it is a base of.
   trunk->between_serial = serial;
+}
+
+static void stack_node_extend_lookahead(Stack *self, StackNode *node, uint32_t end) {
+  for (uint32_t i = 0; i < node->link_count; i++) {
+    StackLink *link = &node->links[i];
+    if (!link->subtree.ptr) continue;
+    if (ts_subtree_extra(link->subtree) && !ts_subtree_is_error(link->subtree)) {
+      stack_node_extend_lookahead(self, link->node, end);
+    } else if (node->position.bytes + ts_subtree_lookahead_bytes(link->subtree) < end) {
+      link->subtree = ts_subtree_with_lookahead_bytes(
+        self->subtree_pool, link->subtree, end - node->position.bytes
+      );
+    }
+  }
+}
+
+TS_STACK_NOINLINE uint32_t ts_stack_lexed_extent(const Stack *self, StackVersion version) {
+  const StackHead *head = array_get(&self->heads, version);
+  const StackNode *node = head->node;
+  uint32_t extent = node->position.bytes;
+  if (head->lookahead_when_paused.ptr) {
+    extent +=
+      ts_subtree_total_bytes(head->lookahead_when_paused) +
+      ts_subtree_lookahead_bytes(head->lookahead_when_paused);
+  }
+  while (node->ref_count == 1) {
+    for (uint32_t i = 0; i < node->link_count; i++) {
+      Subtree subtree = node->links[i].subtree;
+      if (subtree.ptr) {
+        uint32_t byte = node->position.bytes + ts_subtree_lookahead_bytes(subtree);
+        if (byte > extent) extent = byte;
+      }
+    }
+    if (node->link_count == 0) break;
+    node = node->links[0].node;
+  }
+  return extent;
+}
+
+TS_STACK_NOINLINE void ts_stack_extend_lookahead(Stack *self, StackVersion version, uint32_t end) {
+  StackNode *node = array_get(&self->heads, version)->node;
+  bool reaches = node->link_count > 0;
+  for (uint32_t i = 0; i < node->link_count; i++) {
+    Subtree subtree = node->links[i].subtree;
+    if (
+      !subtree.ptr || ts_subtree_extra(subtree) ||
+      node->position.bytes + ts_subtree_lookahead_bytes(subtree) < end
+    ) {
+      reaches = false;
+      break;
+    }
+  }
+  if (!reaches) stack_node_extend_lookahead(self, node, end);
 }
 
 Subtree ts_stack_last_external_token(const Stack *self, StackVersion version) {
