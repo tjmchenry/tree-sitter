@@ -356,6 +356,35 @@ static void ts_parser__breakdown_lookahead(
   }
 }
 
+// A comparison weighs a cost difference by the cheaper version's node count since its last error, which
+// may include nodes before a node being built. With fewer of those nodes the outcome could differ,
+// but only for nodes starting among the last MAX_COST_DIFFERENCE / difference nodes since that error.
+static TS_NOINLINE void ts_parser__note_node_count(
+  TSParser *self,
+  StackVersion version,
+  StackVersion other_version,
+  uint32_t cost_difference,
+  uint32_t node_count
+) {
+  uint32_t count = MAX_COST_DIFFERENCE / cost_difference;
+  if (node_count < count) count = node_count;
+  if (count == 0) return;
+  ts_stack_add_context_below_divergence(self->stack, version, other_version, count);
+}
+
+static inline void ts_parser__note_comparison(
+  TSParser *self,
+  ErrorStatus a,
+  ErrorStatus b,
+  StackVersion version_a,
+  StackVersion version_b
+) {
+  if (a.cost != b.cost && a.is_in_error == b.is_in_error) {
+    if (a.cost < b.cost) ts_parser__note_node_count(self, version_a, version_b, b.cost - a.cost, a.node_count);
+    else ts_parser__note_node_count(self, version_b, version_a, a.cost - b.cost, b.node_count);
+  }
+}
+
 static ErrorComparison ts_parser__compare_versions(
   TSParser *self,
   ErrorStatus a,
@@ -438,6 +467,7 @@ static bool ts_parser__better_version_exists(
         !ts_stack_is_active(self->stack, i) ||
         ts_stack_position(self->stack, i).bytes < position.bytes) continue;
     ErrorStatus status_i = ts_parser__version_status(self, i);
+    ts_parser__note_comparison(self, status, status_i, version, i);
     switch (ts_parser__compare_versions(self, status, status_i)) {
       case ErrorComparisonTakeRight:
         ts_parser__note_drop(self, version, true, false);
@@ -2093,9 +2123,11 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
     // Examine each pair of stack versions, removing any versions that
     // are clearly worse than another version. Ensure that the versions
     // are ordered from most promising to least promising.
+    StackVersion version_i = i;
     for (StackVersion j = 0; j < i; j++) {
       ErrorStatus status_j = ts_parser__version_status(self, j);
 
+      ts_parser__note_comparison(self, status_j, status_i, j, version_i);
       switch (ts_parser__compare_versions(self, status_j, status_i)) {
         case ErrorComparisonTakeLeft:
           made_changes = true;
@@ -2120,12 +2152,14 @@ static uint32_t ts_parser__condense_stack(TSParser *self) {
             j = i;
           } else {
             ts_stack_swap_versions(self->stack, i, j);
+            if (version_i == i) version_i = j;
           }
           break;
 
         case ErrorComparisonTakeRight:
           made_changes = true;
           ts_parser__drop_version(self, j, true);
+          if (version_i > j) version_i--;
           i--;
           j--;
           break;

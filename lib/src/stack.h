@@ -96,6 +96,10 @@ static inline bool ts_stack_place_is_past(StackPlace self, StackPlace other) {
   return self.rank > other.rank;
 }
 
+// Record that dependency for the stack nodes that a version shares with another one, among those
+// that hold any of its `count` most recent nodes.
+void ts_stack_add_context_below_divergence(Stack *, StackVersion, StackVersion other_version, uint32_t count);
+
 // A pop that follows merged paths down to different stack nodes splits them into versions again.
 // Which of those go on was decided by readings that had split off before the stack nodes between
 // the node all the paths share and the top, so a node reduced from one of those later depends on

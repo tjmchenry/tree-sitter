@@ -2909,3 +2909,18 @@ fn test_parsing_after_editing_text_before_a_drop_past_a_missing_token() {
         &[(0, 2, b""), (0, 0, b"xa")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_a_merge_that_raised_a_node_count() {
+    let code = [
+        b"a b b b b b z m ( k c e g".as_slice(),
+        &[b'\n'; 30],
+        b"h f",
+    ]
+    .concat();
+    assert_reparse_matches_fresh_parse(
+        &get_test_fixture_language("reuse_after_a_merge_raised_node_count"),
+        &code,
+        &[(0, 2, b"")],
+    );
+}

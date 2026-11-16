@@ -46,6 +46,7 @@ struct StackNode {
   int32_t dynamic_precedence;
   uint32_t context_start;
   uint32_t context_start_node_count;
+  uint32_t count_floor;
   uint32_t between_serial;
 };
 
@@ -616,6 +617,60 @@ static bool stack_node__is_above_at_byte(const StackNode *node, const StackNode 
 static inline bool stack_node__is_above(const StackNode *node, const StackNode *other) {
   if (node->position.bytes != other->position.bytes) return node->position.bytes > other->position.bytes;
   return stack_node__is_above_at_byte(node, other);
+}
+
+TS_STACK_NOINLINE void ts_stack_add_context_below_divergence(
+  Stack *self,
+  StackVersion version,
+  StackVersion other_version,
+  uint32_t count
+) {
+  StackNode *node = array_get(&self->heads, version)->node;
+  StackNode *other = array_get(&self->heads, other_version)->node;
+  uint32_t floor = node->node_count > count ? node->node_count - count : 0;
+
+  // Skip the stack nodes that only this version has. If an earlier call left its mark where they
+  // end, with no more nodes counted than now, every node this one would mark is marked.
+  while (node->ref_count == 1 && node->link_count == 1) {
+    node = node->links[0].node;
+    if (node->node_count <= floor) return;
+  }
+  if (node->count_floor > 0 && node->count_floor <= floor + 1) return;
+
+  // Find the last stack node that the two versions share, unless none of the nodes it holds is counted.
+  while (node != other) {
+    if (stack_node__is_above(node, other) && node->link_count > 0) {
+      node = node->links[0].node;
+      if (node->node_count <= floor) return;
+    } else if (other->link_count > 0) {
+      other = other->links[0].node;
+    } else if (node->link_count > 0) {
+      node = node->links[0].node;
+      if (node->node_count <= floor) return;
+    } else {
+      return;
+    }
+  }
+
+  if (node->link_count == 0) return;
+  if (node->count_floor > 0 && node->count_floor <= floor + 1) return;
+  node->count_floor = floor + 1;
+  const StackNode *last = node;
+  while (last->link_count > 0 && last->links[0].node->node_count > floor) last = last->links[0].node;
+
+  // Mark from the place just before the lowest of them.
+  StackPlace start = stack_node__place(last);
+  if (start.rank > 0) {
+    start.rank--;
+  } else if (start.node_count > 0) {
+    start.node_count--;
+    start.rank = UINT32_MAX;
+  } else if (start.byte > 0) {
+    start = (StackPlace) {start.byte - 1, UINT32_MAX, 0};
+  } else {
+    return;
+  }
+  stack_node_add_context(node, &start, UINT32_MAX);
 }
 
 TS_STACK_NOINLINE void ts_stack_add_context_between(Stack *self, const StackSliceArray *slices) {
