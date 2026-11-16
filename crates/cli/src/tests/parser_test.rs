@@ -3074,3 +3074,46 @@ fn test_parsing_after_editing_text_whose_tokens_are_reused_while_the_stack_is_sp
         &[(19, 0, b"0"), (19, 1, b""), (15, 1, b"z"), (41, 3, b"")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_a_far_reading_token_that_splits_the_stack() {
+    // The automatic semicolon after `g(a)` is lexed by scanning past the comment. The reparse takes
+    // it from the old tree, and the reduction it starts splits the stack, because `<T>(a)` also
+    // reads as a type assertion. The other reading needs the same token, which it takes from the
+    // token cache instead of lexing it again.
+    let mut parser = Parser::new();
+    parser
+        .set_language(&get_language("typescript/typescript"))
+        .unwrap();
+    let mut code = b"const f = <T>(a) => g(a)\n// returns what g returns for a\n".to_vec();
+    let mut tree = parser.parse(&code, None).unwrap();
+    perform_edit(
+        &mut tree,
+        &mut code,
+        &Edit {
+            position: 5,
+            deleted_length: 0,
+            inserted_text: b" ".to_vec(),
+        },
+    )
+    .unwrap();
+
+    let mut semicolon_lexes = 0;
+    // SAFETY: the logger borrows `semicolon_lexes` and is only invoked during the `parse` call
+    // below, while `semicolon_lexes` is in scope.
+    unsafe {
+        parser.set_logger_unchecked(Some(Box::new(|log_type, message| {
+            if log_type == LogType::Parse
+                && message.starts_with("lexed_lookahead sym:_automatic_semicolon,")
+            {
+                semicolon_lexes += 1;
+            }
+        })));
+    }
+    let tree = parser.parse(&code, Some(&tree)).unwrap();
+    parser.set_logger(None);
+    assert_eq!(semicolon_lexes, 0);
+
+    let fresh = parser.parse(&code, None).unwrap();
+    assert_eq!(tree.root_node().to_sexp(), fresh.root_node().to_sexp());
+}

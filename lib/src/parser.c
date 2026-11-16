@@ -2226,6 +2226,11 @@ static bool ts_parser__advance(
               ts_subtree_release(&self->tree_pool, lookahead);
               lookahead = leaf;
             }
+            // The other versions come to this token too, and one whose lex mode can vouch for it takes it
+            // from the token cache instead of lexing it again. Only a lex that read far ahead is worth that.
+            if (ts_subtree_lookahead_bytes(lookahead) > 15) {
+              ts_parser__cache_reused_leaf(self, position, last_external_token, lookahead);
+            }
           }
 
           if (ts_subtree_child_count(lookahead) > 0) {
