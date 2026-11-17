@@ -3006,3 +3006,16 @@ fn test_parsing_after_editing_text_that_breaks_down_a_rotated_repetition() {
         &[(63, 1, b"g(")],
     );
 }
+
+#[test]
+fn test_parsing_after_editing_text_before_a_rotated_repetition_that_starts_with_a_reused_token() {
+    // In the old text, `(` is the first token of the description after `@em`. The edit removes the
+    // tag, the reparse reuses `(` inside the description's repetition, and balancing rotates it to
+    // the start of a node. Undoing the edit must not reuse that node right after `@em`, where a
+    // description starts with a token, not with its repetition.
+    assert_reparses_match_fresh_parse_after_edits_and_their_undo(
+        &get_language("jsdoc"),
+        b"/@em ({ })",
+        &[(1, 3, b"!\nr\nH *")],
+    );
+}

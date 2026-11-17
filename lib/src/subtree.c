@@ -374,10 +374,14 @@ void ts_subtree_compress(
     MutableSubtree child = ts_subtree_to_mut_unsafe(ts_subtree_children(tree)[0]);
     MutableSubtree grandchild = ts_subtree_to_mut_unsafe(ts_subtree_children(child)[child.ptr->child_count - 1]);
     ts_subtree_summarize_children(grandchild, language);
-    // `grandchild` now starts at its new first child, so it takes that child's parse state,
-    // unless it has none.
+    // `grandchild` now follows the repetition that `child` starts with, so it takes the state that
+    // repetition leads to, unless it has none. Its first child's parse state isn't always that: a
+    // token's is the state it was lexed in, which reductions before its shift or reuse in another
+    // state leave behind.
     if (grandchild.ptr->parse_state != TS_TREE_STATE_NONE) {
-      grandchild.ptr->parse_state = ts_subtree_parse_state(ts_subtree_children(grandchild)[0]);
+      grandchild.ptr->parse_state = child.ptr->parse_state == TS_TREE_STATE_NONE
+        ? TS_TREE_STATE_NONE
+        : ts_language_next_state(language, child.ptr->parse_state, child.ptr->symbol);
     }
     ts_subtree_summarize_children(child, language);
     ts_subtree_summarize_children(tree, language);
