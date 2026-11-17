@@ -364,6 +364,7 @@ void ts_subtree_compress(
 
     grandchild.ptr->end_state = child.ptr->end_state;
     grandchild.ptr->depends_on_context |= child.ptr->depends_on_context;
+    child.ptr->rotated = true;
     array_push(stack, tree);
     tree = grandchild;
   }

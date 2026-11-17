@@ -271,9 +271,25 @@ static bool ts_parser__breakdown_top_of_stack(
       TSStateId state = ts_stack_state(self->stack, slice.version);
       Subtree parent = *array_front(&slice.subtrees);
       Subtree fragile_child = NULL_SUBTREE;
+      Subtree rotated_node = NULL_SUBTREE;
 
-      for (uint32_t j = 0, n = ts_subtree_child_count(parent); j < n; j++) {
+      // A fresh parse reduces a repetition one item at a time, so a rotated node never follows other
+      // items of its repetition on its stack, and pushing its items would leave a stack deeper than
+      // a fresh parse's, which error recovery reads. Stop before such a node and parse its items
+      // again, from its first one.
+      if (ts_subtree_rotated(parent)) {
+        rotated_node = parent;
+        pending = false;
+      }
+
+      for (uint32_t j = 0, n = ts_subtree_child_count(parent); j < n && !rotated_node.ptr; j++) {
         Subtree child = ts_subtree_children(parent)[j];
+
+        if (ts_subtree_rotated(child)) {
+          rotated_node = child;
+          pending = false;
+          break;
+        }
 
         // A child reduced while the stack was split holds the reading that won, and tokens after
         // it may have decided that. Stop before such a child, so it and the rest of the parent are
@@ -302,7 +318,7 @@ static bool ts_parser__breakdown_top_of_stack(
         ts_stack_keep_lex_state(self->stack, slice.version, lex_state);
       }
 
-      if (fragile_child.ptr) {
+      if (fragile_child.ptr || rotated_node.ptr) {
         for (uint32_t j = 1; j < slice.subtrees.size; j++) {
           ts_subtree_release(&self->tree_pool, *array_get(&slice.subtrees, j));
         }
@@ -311,10 +327,16 @@ static bool ts_parser__breakdown_top_of_stack(
           ts_stack_find_last_external_token(self->stack, slice.version)
         );
         ts_parser__seek_reusable_node(
-          self, fragile_child, ts_stack_position(self->stack, slice.version).bytes
+          self,
+          fragile_child.ptr ? fragile_child : ts_subtree_children(rotated_node)[0],
+          ts_stack_position(self->stack, slice.version).bytes
         );
         self->breakdown_rewound = true;
-        LOG("breakdown_stop_before_fragile_child tree:%s", TREE_NAME(fragile_child));
+        if (fragile_child.ptr) {
+          LOG("breakdown_stop_before_fragile_child tree:%s", TREE_NAME(fragile_child));
+        } else {
+          LOG("breakdown_stop_before_rotated_node tree:%s", TREE_NAME(rotated_node));
+        }
       } else {
         for (uint32_t j = 1; j < slice.subtrees.size; j++) {
           Subtree tree = *array_get(&slice.subtrees, j);

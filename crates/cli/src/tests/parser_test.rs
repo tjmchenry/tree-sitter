@@ -2985,3 +2985,24 @@ fn test_parsing_after_editing_text_a_dropped_version_lexed() {
 }
 
 const BASH_CASE_STATEMENTS: &[u8] = b"\ncase \"opt\" in\n  a)\n    echo a\n    ;;\n\n  b)\n    echo b\n    ;&\n\n  c)\n    echo c;;\nc\n\ncase \"opt\" in\n  (a)\n    echo a\n    ;;\n\n  (b)\n    echo b\n    ;&\n\n  (c)\n    echo c;;\nesac\n\ncase \"$Z\" in\n  ab*|cd*) ef\nesac\n\ncase $dest in\n  *.[1357])\n    exit $?\n    ;;\nesac\n\ncase x in x) echo meow ;; esac\n\ncase foo in\n  bar\\ baz) : ;;\nesac\n\ncase \"$arg\" in\n  *([0-9])([0-9])) echo \"$arg\"\nesac\n\ncase ${lang} in\nCMakeLists.txt | \\\n\tcmake_modules | \\\n\t${PN}.pot) ;;\n*) rm -r ${lang} || die ;;\nesac\n";
+
+#[test]
+fn test_parsing_after_editing_text_that_breaks_down_a_rotated_repetition() {
+    // Balancing the old tree rotates the `type_case` repetition, so the repetition reused before
+    // `default` ends in a node holding the last two cases. When `default:` becomes `defaultg(`, the
+    // reused repetition is broken down, and the stack must be as deep as a fresh parse's: error
+    // recovery reads its depth.
+    let go = get_language("go");
+    assert_reparse_matches_fresh_parse(
+        &go,
+        b"{{}\nswitch.(type){case n:(i)\ncase f:case t:case l,g:(\"\")\ndefault:",
+        &[(64, 1, b"g(")],
+    );
+    // Here the first cases are parsed again, and the node holding the last two is reused whole
+    // after them before it is broken down.
+    assert_reparse_matches_fresh_parse(
+        &go,
+        b"{{}\nswitch.(type{case n:(i)\ncase f:case t:case l,g:(\"\")\ndefault:",
+        &[(63, 1, b"g(")],
+    );
+}

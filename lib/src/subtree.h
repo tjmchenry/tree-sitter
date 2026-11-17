@@ -123,6 +123,7 @@ typedef struct {
   bool fragile_left : 1;
   bool fragile_right : 1;
   bool depends_on_context : 1;
+  bool rotated : 1;
   bool has_changes : 1;
   bool has_external_tokens : 1;
   bool has_external_scanner_state_change : 1;
@@ -369,6 +370,10 @@ static inline bool ts_subtree_has_external_scanner_state_change(Subtree self) {
 
 static inline bool ts_subtree_depends_on_column(Subtree self) {
   return self.data.is_inline ? self.data.depends_on_column : self.ptr->depends_on_column;
+}
+
+static inline bool ts_subtree_rotated(Subtree self) {
+  return self.data.is_inline ? false : self.ptr->rotated;
 }
 
 static inline bool ts_subtree_depends_on_context(Subtree self) {
